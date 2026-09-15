@@ -49,16 +49,43 @@ it('status uses owner filter and current month', async () => {
   expect(d.month).toBe('2026-09')
   expect(d.rows[0]).toMatchObject({ category: 'Groceries', spent: 2500, usedPct: 25 })
 })
-// Review round item 10: a smoke test that owners.yaml's name-based --owner
-// reaches `budget status` through the shared applyFilters path.
-it('status --owner <name> filters by owners.yaml owner name once the file exists', async () => {
+// Final-review item 2/3: a non-vacuous assertion (the actual `spent` figure,
+// same derivation as the legacy --owner me test above: alex owns "Card
+// PLN" = acc-pln, whose Sept Groceries net is t1 (3000 expense) - t5 (500
+// refund) = 2500 PLN, 25% of the 10000 limit) plus meta.owner echoing the
+// file's spelling for a differently-cased --owner value.
+it('status --owner <name> filters the actual spent figure, and meta.owner echoes the file spelling', async () => {
   const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
   withOwnersFile(t, FAMILY_OWNERS_YAML)
   mkdirSync(t.ctx.paths.budgetDir, { recursive: true })
   writeFileSync(join(t.ctx.paths.budgetDir, 'default.yaml'), 'currency: PLN\nlimits:\n  Groceries: 10000\n')
-  const code = await run(['node', 'zm', 'budget', 'status', '--owner', 'alex'], t.ctx)
+  const code = await run(['node', 'zm', 'budget', 'status', '--owner', 'ALEX'], t.ctx)
   expect(code).toBe(0)
-  expect(t.json().meta.owner).toBe('alex')
+  const d = t.json().data
+  expect(d.rows[0]).toMatchObject({ category: 'Groceries', spent: 2500, usedPct: 25 })
+  expect(t.json().meta.owner).toBe('alex') // echoes the file's spelling, not the caller's "ALEX"
+})
+// Final-review item 2: budget suggest smoke test. Window (3 trailing full
+// months before the default target of next month, from a 'now' of
+// 2026-09-15) is Jun/Jul/Aug 2026. alex owns "Card PLN" (acc-pln), whose
+// Groceries net spend those months is t15 (Jun, 40000), t16 (Jul, 50000),
+// t17 (Aug, 45000) — present in all 3 months, median 45000, so alex's draft
+// includes "Groceries: 45000". sam owns only "acc-partner", which has NO
+// Groceries activity in Jun-Aug at all (its one Groceries tx, t2, is in
+// Sept, outside the window) — fewer than half the sampled months, so it's
+// dropped entirely from sam's draft.
+it('suggest --owner <name> filters the draft by owners.yaml owner name', async () => {
+  const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  const alexCode = await run(['node', 'zm', 'budget', 'suggest', '--owner', 'alex'], t.ctx)
+  expect(alexCode).toBe(0)
+  expect(t.out.join('')).toMatch(/Groceries: 45000/)
+
+  const t2 = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
+  withOwnersFile(t2, FAMILY_OWNERS_YAML)
+  const samCode = await run(['node', 'zm', 'budget', 'suggest', '--owner', 'sam'], t2.ctx)
+  expect(samCode).toBe(0)
+  expect(t2.out.join('')).not.toMatch(/Groceries:/)
 })
 it('status skips a limit key that no longer resolves, warning and listing it as unresolved', async () => {
   const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })

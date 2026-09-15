@@ -5,7 +5,7 @@ import type { Command } from 'commander'
 import type { AppContext } from '../context.js'
 import { withStore, staleWarnings, formatOf, openCheckedStore } from '../program.js'
 import { categoryPath, loadDataset, meUser } from '../../query/model.js'
-import { applyFilters, isValidMonth } from '../../query/filters.js'
+import { applyFilters, isValidMonth, ownerMetaValue } from '../../query/filters.js'
 import { loadOwnersFile, ownersFilePath } from '../../query/owners.js'
 import { loadBudget } from '../../budget/files.js'
 import { budgetStatus, unresolvedLimits, type BudgetStatus, type StatusRow } from '../../budget/status.js'
@@ -103,7 +103,7 @@ export function registerBudget(program: Command, ctx: AppContext): void {
         const monthTxs = applyFilters(ds, { month, owner })
         const data = budgetStatus(ds, resolvable, monthTxs, month, ctx.now(), unresolved)
 
-        return { data, meta: { sources, owner }, table: flattenStatusTable(data), warnings: [...warnings, ...ds.ownerWarnings] }
+        return { data, meta: { sources, owner: ownerMetaValue(ds, owner) }, table: flattenStatusTable(data), warnings: [...warnings, ...ds.ownerWarnings] }
       })
     })
 

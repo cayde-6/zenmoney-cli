@@ -3,7 +3,7 @@ import type { AppContext } from '../context.js'
 import { addFilterOptions, readFilters, withStore } from '../program.js'
 import { flattenGroups } from '../output.js'
 import { loadDataset } from '../../query/model.js'
-import { applyFilters, currencyWarnings, resolveFilterRefs, resolvePeriod } from '../../query/filters.js'
+import { applyFilters, currencyWarnings, ownerMetaValue, resolveFilterRefs, resolvePeriod } from '../../query/filters.js'
 import { loadOwnersFile, ownersFilePath } from '../../query/owners.js'
 import { spendBy, incomeBy, type SpendBy } from '../../analytics/spend.js'
 import { compare, parsePeriod } from '../../analytics/compare.js'
@@ -43,7 +43,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
           table: flattenGroups(data),
           meta: {
             by: opts.by, from: period.from, to: period.to, category: refs.categoryPath,
-            owner: cmd.optsWithGlobals().owner, account: refs.accountId, currency: filters.currency ?? null,
+            owner: ownerMetaValue(ds, filters.owner), account: refs.accountId, currency: filters.currency ?? null,
           },
           warnings: [...currencyWarnings(ds, filters.currency), ...ds.ownerWarnings],
         }
@@ -72,7 +72,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
           table: flattenGroups(data),
           meta: {
             by: opts.by, from: period.from, to: period.to, category: refs.categoryPath,
-            owner: cmd.optsWithGlobals().owner, account: refs.accountId, currency: filters.currency ?? null,
+            owner: ownerMetaValue(ds, filters.owner), account: refs.accountId, currency: filters.currency ?? null,
           },
           warnings: [...currencyWarnings(ds, filters.currency), ...ds.ownerWarnings],
         }
@@ -108,7 +108,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
           table: data,
           meta: {
             by: opts.by, period: opts.period, vs: opts.vs,
-            category: refs.categoryPath, account: refs.accountId, currency: filters.currency ?? null, owner: cmd.optsWithGlobals().owner,
+            category: refs.categoryPath, account: refs.accountId, currency: filters.currency ?? null, owner: ownerMetaValue(ds, filters.owner),
           },
           warnings: [...currencyWarnings(ds, filters.currency), ...ds.ownerWarnings],
         }
@@ -148,7 +148,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
           table: data,
           meta: {
             months, minMonths, from: window.from, to: window.to,
-            category: refs.categoryPath, account: refs.accountId, currency: filters.currency ?? null, owner: cmd.optsWithGlobals().owner,
+            category: refs.categoryPath, account: refs.accountId, currency: filters.currency ?? null, owner: ownerMetaValue(ds, filters.owner),
           },
           warnings: [...currencyWarnings(ds, filters.currency), ...ds.ownerWarnings],
         }
