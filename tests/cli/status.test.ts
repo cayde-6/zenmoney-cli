@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest'
-import { writeFileSync, readFileSync, mkdirSync, statSync, existsSync, chmodSync, readdirSync } from 'node:fs'
+import { writeFileSync, readFileSync, mkdirSync, statSync, existsSync, chmodSync, readdirSync, rmSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -59,6 +59,51 @@ it('reports cache.readable: false and cache.error for a corrupted cache, without
   expect(cache.lastSyncAt).toBeNull()
   expect(typeof cache.error).toBe('string')
   expect(cache.error.length).toBeGreaterThan(0)
+})
+// Review round item 1: a permission problem on the real cache file itself
+// must be reported as a plain cache-side error, with none of the "could
+// not snapshot the cache: " prefix reserved for a problem on the local
+// temp side — confirmed with a real, unreadable file (chmod 0000) rather
+// than a mocked one, since this is exactly the scenario an earlier version
+// of status.ts got wrong (copyFileSync's `.dest` being set on every
+// failure, source-side included, made it indistinguishable from a
+// temp-side one). win32 has no POSIX permission bits, so chmod 0000
+// doesn't actually block reads there — skipped on that platform, same as
+// the other permission-based tests in this file.
+it.skipIf(process.platform === 'win32')('reports a plain (unprefixed) error for a cache file with no read permission', async () => {
+  const t = testContext()
+  mkdirSync(dirname(t.ctx.paths.cacheDb), { recursive: true })
+  writeFileSync(t.ctx.paths.cacheDb, 'irrelevant contents')
+  chmodSync(t.ctx.paths.cacheDb, 0o000)
+  try {
+    expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
+    const cache = t.json().data.cache
+    expect(cache.exists).toBe(true)
+    expect(cache.readable).toBe(false)
+    expect(typeof cache.error).toBe('string')
+    expect(cache.error).not.toMatch(/^could not snapshot the cache: /)
+  } finally {
+    chmodSync(t.ctx.paths.cacheDb, 0o600) // restore so cleanup can remove it
+  }
+})
+// Same as above, but for a `-wal` file that exists and is itself
+// unreadable (rather than the main db file) — the main db file stays
+// perfectly readable throughout, isolating the check specifically added
+// for `-wal` in attemptSnapshot.
+it.skipIf(process.platform === 'win32')('reports a plain (unprefixed) error when an existing -wal file has no read permission', async () => {
+  const t = seededContext()
+  writeFileSync(`${t.ctx.paths.cacheDb}-wal`, 'irrelevant wal contents')
+  chmodSync(`${t.ctx.paths.cacheDb}-wal`, 0o000)
+  try {
+    expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
+    const cache = t.json().data.cache
+    expect(cache.readable).toBe(false)
+    expect(typeof cache.error).toBe('string')
+    expect(cache.error).not.toMatch(/^could not snapshot the cache: /)
+  } finally {
+    chmodSync(`${t.ctx.paths.cacheDb}-wal`, 0o600)
+    rmSync(`${t.ctx.paths.cacheDb}-wal`, { force: true })
+  }
 })
 // Review round item 8: `zm status` must be a pure read — no mkdir, no WAL
 // pragma, no migrate, no chmod. Verified two ways: (a) a garbage cache file's
@@ -163,27 +208,37 @@ it('reports a healthy cache as readable in a read-only cache directory', async (
 // tell "nothing was created" apart from "something was created and removed"
 // and could collide with anything else on the machine using that prefix.
 
-// Review round item 1/6b: a checkpoint (or any other write) landing between
-// the two `copyFileSync` calls in a single snapshot attempt can produce a
-// torn, internally-inconsistent pair of files. A real concurrent writer
-// that commits and lets SQLite auto-checkpoint aggressively (a small
+// Review round item 1/6b/2: a checkpoint (or any other write) landing
+// between the two `copyFileSync` calls in a single snapshot attempt can
+// produce a torn, internally-inconsistent pair of files. A real concurrent
+// writer that commits and lets SQLite auto-checkpoint aggressively (a small
 // `wal_autocheckpoint`) is about as good a stress test for that as this
-// process can run without external tooling: every `zm status` call across
-// a bounded window must come back either `readable: false` (the stability
-// check or `quick_check` caught something) or `readable: true` with a
-// `lastSyncAt` that never regresses relative to an earlier read — since the
-// writer only ever advances `lastSyncAt`, a valid read can never see it go
-// backwards. Both the parent's read loop and the child's write loop are
-// bounded (wall-clock deadline plus a hard iteration cap) so this can never
-// hang the suite, and the child is always killed in `finally`.
+// process can run without external tooling.
+//
+// Follow-up round: an earlier version of this test was vacuous — its read
+// loop never actually yielded to the event loop between iterations (every
+// `await run(...)` here resolves via microtasks only, since `zm status`
+// does no real async I/O), so the child's stdout/stderr/exit events sat
+// unprocessed in libuv's queue for the entire loop and were only ever
+// inspected once it was already over; and the loop could in principle run
+// to completion without a single read ever actually overlapping the
+// writer's activity, silently proving nothing. Fixed by: waiting for an
+// explicit READY signal from the child (printed right after its first
+// commit) before reading at all, an explicit `setImmediate` yield between
+// every read so pipe/exit events actually get delivered along the way, and
+// looping specifically UNTIL a read observes a writer-produced value
+// (`lastSyncAt >= writerBaseMs`) rather than for a fixed count — if the
+// deadline is hit without ever observing one, the assertion below fails
+// instead of the test silently passing on seeded-but-never-updated data.
 it('never regresses lastSyncAt or reports a failed integrity check under a rapidly-checkpointing concurrent writer', async () => {
   const t = seededContext()
+  const writerBaseMs = Date.parse('2030-01-01T00:00:00.000Z') // well after the fixture's seeded lastSyncAt
   const child = spawn(process.execPath, ['-e', `
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(${JSON.stringify(t.ctx.paths.cacheDb)});
     db.exec('PRAGMA journal_mode=WAL');
     db.exec('PRAGMA wal_autocheckpoint=50');
-    const base = Date.parse('2030-01-01T00:00:00.000Z'); // well after the fixture's seeded lastSyncAt
+    const base = ${writerBaseMs};
     const deadline = Date.now() + 5000;
     let i = 0;
     while (Date.now() < deadline && i < 200000) {
@@ -191,18 +246,43 @@ it('never regresses lastSyncAt or reports a failed integrity check under a rapid
       db.exec('BEGIN IMMEDIATE');
       db.exec("INSERT OR REPLACE INTO meta(key, value) VALUES ('lastSyncAt', '" + iso + "')");
       db.exec('COMMIT');
+      if (i === 0) console.log('READY'); // signal only after the first commit actually landed
       i++;
     }
     db.close();
   `])
+  let childStdout = ''
+  let childReady = false
+  child.stdout?.on('data', chunk => {
+    childStdout += chunk
+    if (childStdout.includes('READY')) childReady = true
+  })
   let childStderr = ''
   child.stderr?.on('data', chunk => { childStderr += chunk })
+  // Registered immediately (rather than inside `finally`, after the child
+  // may already have exited — e.g. crashing before ever printing READY):
+  // an event that already fired before a listener is added is simply
+  // never delivered to it, which would otherwise hang the `finally` below
+  // forever waiting on a 'close' that's already happened.
+  const childClosed = new Promise<void>(resolve => child.on('close', () => resolve()))
 
   try {
-    const deadline = Date.now() + 2000
+    const readyDeadline = Date.now() + 5000
+    while (!childReady) {
+      if (child.exitCode !== null) {
+        throw new Error(`lock-holder child exited early (code ${child.exitCode}) before READY; stderr: ${childStderr}`)
+      }
+      if (Date.now() > readyDeadline) {
+        throw new Error(`timed out waiting for the child's READY signal; stderr: ${childStderr}`)
+      }
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+
     let lastSeenMs: number | null = null
+    let sawWriterValue = false
+    const readDeadline = Date.now() + 2000
     let reads = 0
-    while (Date.now() < deadline && reads < 300) {
+    while (!sawWriterValue && Date.now() < readDeadline && reads < 300) {
       const code = await run(['node', 'zm', 'status'], t.ctx)
       expect(code).toBe(0)
       const cache = JSON.parse(t.out[t.out.length - 1]!).data.cache
@@ -211,15 +291,23 @@ it('never regresses lastSyncAt or reports a failed integrity check under a rapid
         const ms = new Date(cache.lastSyncAt).getTime()
         if (lastSeenMs !== null) expect(ms).toBeGreaterThanOrEqual(lastSeenMs)
         lastSeenMs = ms
+        if (ms >= writerBaseMs) sawWriterValue = true
       } else {
         expect(typeof cache.error).toBe('string')
       }
       reads++
+      // Without this, the whole loop above resolves through microtasks
+      // only and never actually yields to libuv's poll phase — see the
+      // comment above this test.
+      await new Promise(resolve => setImmediate(resolve))
     }
     expect(reads).toBeGreaterThan(0)
-    expect(childStderr).toBe('')
+    expect(sawWriterValue).toBe(true) // otherwise this test never exercised any real concurrency
   } finally {
     child.kill()
-    await new Promise(resolve => child.on('exit', resolve))
+    await childClosed // 'close', not 'exit': guarantees stdio is fully drained first
   }
+
+  expect(childStderr).toBe('')
+  expect(child.exitCode === 0 || child.signalCode === 'SIGTERM').toBe(true) // clean run or our own kill, never a crash
 }, 10_000)

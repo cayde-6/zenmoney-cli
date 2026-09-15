@@ -1,4 +1,4 @@
-import { constants as fsConstants, existsSync, mkdtempSync, copyFileSync, rmSync, statSync, openSync, readSync, closeSync } from 'node:fs'
+import { constants as fsConstants, existsSync, accessSync, mkdtempSync, copyFileSync, rmSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -29,7 +29,12 @@ function walPath(path: string): string { return `${path}-wal` }
 // reading the whole (potentially large, actively-growing) file. `null`
 // means no `-wal` exists (including "disappeared while we were reading
 // it", e.g. a writer just checkpointed and removed it) — that's a real,
-// meaningful state to compare, not an error.
+// meaningful state to compare, not an error. Any other failure (most
+// plausibly `EACCES`) is a real problem reading the cache's own `-wal`
+// file and is propagated as-is: nothing in this function ever touches the
+// temp side, so — consistent with the explicit `accessSync` check in
+// `attemptSnapshot` below — none of its failures get that path's
+// "could not snapshot the cache: " prefix.
 function readWalHeader(path: string): Buffer | null {
   let fd: number
   try {
@@ -61,22 +66,34 @@ function snapshotsMatch(a: FileSnapshot, b: FileSnapshot): boolean {
   return true
 }
 
-// `ENOSPC`/`EACCES` writing into OUR OWN temp directory (full disk, some
-// unusual tmpdir permission setup) is an environment problem, not a cache
-// problem — worth telling apart from "the real cache file/dir has a
-// permission problem" so whoever reads the error message doesn't go
-// chasing the wrong thing. `copyFileSync`'s error carries the destination
-// it failed to write as `.dest` (distinct from `.path`, the source), which
-// is what's checked here rather than guessing from the message text.
-function isTempSideError(e: unknown, destPaths: string[]): boolean {
-  const err = e as NodeJS.ErrnoException & { dest?: string }
-  if (err.code !== 'ENOSPC' && err.code !== 'EACCES') return false
-  return typeof err.dest === 'string' && destPaths.includes(err.dest)
+// `ENOSPC`/`EACCES` from `copyFileSync` at this point (i.e. once the source
+// has already been confirmed readable via `accessSync` in `attemptSnapshot`
+// below) is an environment problem on OUR OWN temp directory — a full disk,
+// or some unusual tmpdir permission setup — not a cache problem, worth
+// telling apart from "the real cache file/dir has a permission problem" so
+// whoever reads the error message doesn't go chasing the wrong thing.
+//
+// This deliberately does NOT look at `copyFileSync`'s `.dest` property to
+// decide: confirmed empirically, Node sets `.dest` to our destination path
+// on EVERY `copyFileSync` failure, including one caused by the SOURCE being
+// unreadable — so `.dest` can't actually distinguish which side failed, and
+// checking it (an earlier version of this code did) risked mislabeling a
+// real cache-side permission problem as a local one. The `accessSync` calls
+// in `attemptSnapshot`, run before any `copyFileSync` call, are what
+// actually rule out a source-side cause first.
+function isLikelyTempSideError(e: unknown): boolean {
+  const code = (e as NodeJS.ErrnoException).code
+  return code === 'ENOSPC' || code === 'EACCES'
 }
 
 type AttemptResult =
   | { ok: true; lastSyncAt: string | null }
-  | { ok: false; retry: true }
+  // `reason` is set only when the retry is a quick_check failure — if this
+  // turns out to be the last attempt, readCacheInfo reports that specific
+  // message instead of the generic "being written" one, since a real,
+  // reproducible integrity problem (as opposed to a torn snapshot that a
+  // fresh copy might fix) is a more useful thing to say.
+  | { ok: false; retry: true; reason?: string }
   | { ok: false; retry: false; error: string }
 
 // One attempt at the snapshot-and-read described on `readCacheInfo`. Always
@@ -85,13 +102,43 @@ type AttemptResult =
 function attemptSnapshot(path: string): AttemptResult {
   let tempDir: string | null = null
   try {
+    // Confirm the real cache file (and its `-wal`, if it has one) is
+    // actually readable before touching anything else. This has to happen
+    // up front, rather than just reacting to whatever `copyFileSync` throws
+    // later: its thrown error can't be trusted to say which side failed
+    // (see `isLikelyTempSideError`), so the only reliable way to tell "the
+    // cache itself is unreadable" apart from "our own temp copy failed" is
+    // to rule the former out explicitly, first. A failure here is reported
+    // as-is — the same shape as any other cache-side error — with no retry
+    // (a permission problem doesn't resolve itself within a few attempts)
+    // and no "could not snapshot the cache" prefix (that's reserved for
+    // problems on the temp side, not the real cache).
+    try {
+      accessSync(path, fsConstants.R_OK)
+    } catch (e) {
+      return { ok: false, retry: false, error: (e as Error).message }
+    }
+    try {
+      accessSync(walPath(path), fsConstants.R_OK)
+    } catch (e) {
+      // `ENOENT` just means there's no `-wal` right now (the common case for
+      // a cleanly-closed cache) — nothing to check yet at this point, since
+      // no `before` snapshot exists yet for its absence to be a *change*
+      // from. Anything else (most plausibly `EACCES`) is a real cache-side
+      // access problem on a `-wal` that does exist.
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return { ok: false, retry: false, error: (e as Error).message }
+      }
+    }
+
     try {
       tempDir = mkdtempSync(join(tmpdir(), 'zm-status-'))
     } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code
       const message = (e as Error).message
-      const prefixed = code === 'ENOSPC' || code === 'EACCES'
-      return { ok: false, retry: false, error: prefixed ? `could not snapshot the cache: ${message}` : message }
+      // mkdtemp only ever touches the temp side — the source was already
+      // confirmed readable just above — so unlike a copy failure, no
+      // separate disambiguation is needed here.
+      return { ok: false, retry: false, error: `could not snapshot the cache: ${message}` }
     }
 
     const copyPath = join(tempDir, basename(path))
@@ -109,14 +156,18 @@ function attemptSnapshot(path: string): AttemptResult {
       }
     } catch (e) {
       const err = e as NodeJS.ErrnoException
-      // The `-wal` existed an instant ago (per `before`) but is gone now —
-      // most likely a writer just checkpointed and removed it. That's a
-      // real change to the cache mid-snapshot, not a hard failure: retry
-      // with a fresh copy rather than reporting unreadable.
+      // The `-wal` existed an instant ago (per `before`, taken after the
+      // access checks above) but is gone now — most likely a writer just
+      // checkpointed and removed it. That's a real change to the cache
+      // mid-snapshot, not a hard failure: retry with a fresh copy rather
+      // than reporting unreadable.
       if (err.code === 'ENOENT' && err.path === walPath(path)) {
         return { ok: false, retry: true }
       }
-      if (isTempSideError(err, [copyPath, walCopyPath])) {
+      // The source was already confirmed readable above, so a failure
+      // reaching here is far more likely to be a genuine temp-side problem
+      // (e.g. the temp filesystem filling up between then and now).
+      if (isLikelyTempSideError(err)) {
         return { ok: false, retry: false, error: `could not snapshot the cache: ${err.message}` }
       }
       throw e
@@ -137,7 +188,15 @@ function attemptSnapshot(path: string): AttemptResult {
       const check = db.prepare('PRAGMA quick_check').get() as { quick_check: string } | undefined
       const checkResult = check?.quick_check ?? 'no result'
       if (checkResult !== 'ok') {
-        return { ok: false, retry: false, error: `cache integrity check failed: ${checkResult}` }
+        // Reached only after the before/after stability check above already
+        // passed, so this is most likely a tear that check's coarse
+        // size/mtime/wal-header comparison missed (e.g. a filesystem with
+        // low mtime resolution) rather than a reproducible integrity
+        // problem — worth another attempt with a fresh copy, same as an
+        // outright stability mismatch, rather than giving up immediately.
+        // `reason` carries the message forward in case this turns out to be
+        // the last attempt.
+        return { ok: false, retry: true, reason: `cache integrity check failed: ${checkResult}` }
       }
       return { ok: true, lastSyncAt: readLastSyncAt(db) }
     } finally {
@@ -189,18 +248,30 @@ function attemptSnapshot(path: string): AttemptResult {
 // nonsensical data. `attemptSnapshot` guards against this two ways: a
 // `statSync`/`-wal`-header comparison taken immediately before and after
 // the copy detects the source changing mid-copy, and `PRAGMA quick_check`
-// on the resulting copy catches whatever that comparison might still miss.
-// Either one failing (or the `-wal` disappearing mid-copy — see
+// on the resulting copy catches whatever that comparison might still miss
+// (e.g. a filesystem whose mtime resolution is too coarse to register a
+// change that landed within the same tick). Either one failing (or the
+// `-wal` disappearing mid-copy, or a permission problem on `-wal`
+// specifically that appeared after it was already confirmed present — see
 // `attemptSnapshot`) means a retry with a fresh temp dir, up to
-// `MAX_SNAPSHOT_ATTEMPTS` times, before finally reporting `readable: false`
-// with a message that says to retry shortly, since at that point a writer
-// is genuinely, persistently active rather than status having hit one
-// unlucky moment.
+// `MAX_SNAPSHOT_ATTEMPTS` times. Once every attempt has been exhausted,
+// this reports the *last* attempt's specific reason if it was a
+// quick_check failure (a real, reproducible integrity problem is more
+// useful to say than "try again"), or otherwise the generic "being
+// written" message, since at that point a writer is genuinely,
+// persistently active rather than status having hit one unlucky moment.
+//
+// A permission problem on the real cache file (or its `-wal`) is a
+// different kind of failure entirely — not transient, and not something a
+// retry could ever fix — and is reported immediately via `attemptSnapshot`'s
+// own `accessSync` checks, with `retry: false`, before any of the above
+// ever runs.
 function readCacheInfo(path: string, now: () => Date): CacheInfo {
   if (!existsSync(path)) {
     return { path, exists: false, readable: false, lastSyncAt: null, ageHours: null }
   }
 
+  let lastRetryReason: string | null = null
   for (let attempt = 1; attempt <= MAX_SNAPSHOT_ATTEMPTS; attempt++) {
     const result = attemptSnapshot(path)
     if (result.ok) {
@@ -211,8 +282,10 @@ function readCacheInfo(path: string, now: () => Date): CacheInfo {
     if (!result.retry) {
       return { path, exists: true, readable: false, lastSyncAt: null, ageHours: null, error: result.error }
     }
+    lastRetryReason = result.reason ?? null
   }
-  return { path, exists: true, readable: false, lastSyncAt: null, ageHours: null, error: 'cache is being written by another process, retry shortly' }
+  const error = lastRetryReason ?? 'cache is being written by another process, retry shortly'
+  return { path, exists: true, readable: false, lastSyncAt: null, ageHours: null, error }
 }
 
 // `zm status` is deliberately the one command that always works: no network

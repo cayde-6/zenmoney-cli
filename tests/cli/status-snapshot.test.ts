@@ -159,36 +159,25 @@ it('retries the snapshot on an unstable stat, then reports readable:false once a
   expect(statCallsOnCache).toHaveLength(6)
 })
 
-// Review round item 5: mkdtempSync failing is always a local-temp-side
-// problem (it never touches the real cache), so it always gets the
-// "could not snapshot the cache: " prefix — unlike a copy failure, where
-// only some error codes/destinations qualify (covered separately below).
-it('prefixes a mkdtemp failure as a local snapshot problem, not a cache problem', async () => {
+// Review round item 5 (and item 1's follow-up correction): mkdtempSync
+// failing is always a local-temp-side problem — by the time it's called,
+// the real cache (and its `-wal`, if any) has already been confirmed
+// readable via `accessSync`, and mkdtempSync itself never touches the real
+// cache at all — so it always gets the "could not snapshot the cache: "
+// prefix, regardless of its error code (unlike a copy failure, which only
+// qualifies for the prefix on specific codes — covered separately below,
+// since a copy failure's error code is the only signal available once
+// `.dest` was found not to reliably indicate which side failed).
+it('prefixes any mkdtemp failure as a local snapshot problem, not a cache problem', async () => {
   const fs = await import('node:fs')
   const { run } = await import('../../src/cli/program.js')
   const { seededContext } = await import('../helpers.js')
   const t = seededContext()
 
   vi.mocked(fs.mkdtempSync).mockImplementationOnce(() => {
-    const err = new Error('ENOSPC: no space left on device, mkdtemp') as NodeJS.ErrnoException
-    err.code = 'ENOSPC'
-    throw err
-  })
-
-  expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
-  const cache = t.json().data.cache
-  expect(cache.readable).toBe(false)
-  expect(cache.error).toMatch(/^could not snapshot the cache: /)
-})
-// A code other than ENOSPC/EACCES from mkdtemp is reported as-is (no
-// prefix) — exercises the ternary's other branch.
-it('does not prefix a non-ENOSPC/EACCES mkdtemp failure', async () => {
-  const fs = await import('node:fs')
-  const { run } = await import('../../src/cli/program.js')
-  const { seededContext } = await import('../helpers.js')
-  const t = seededContext()
-
-  vi.mocked(fs.mkdtempSync).mockImplementationOnce(() => {
+    // A code that would NOT qualify for the temp-side prefix if this were
+    // a copyFileSync failure (see isLikelyTempSideError) — proving mkdtemp
+    // is treated unconditionally, not via the same code-based check.
     const err = new Error('simulated unexpected mkdtemp failure') as NodeJS.ErrnoException
     err.code = 'EMFILE'
     throw err
@@ -197,7 +186,7 @@ it('does not prefix a non-ENOSPC/EACCES mkdtemp failure', async () => {
   expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
   const cache = t.json().data.cache
   expect(cache.readable).toBe(false)
-  expect(cache.error).toBe('simulated unexpected mkdtemp failure')
+  expect(cache.error).toBe('could not snapshot the cache: simulated unexpected mkdtemp failure')
 })
 
 // Review round item 2: the `-wal` file existing when `before` is taken but
@@ -289,7 +278,18 @@ it('reports an unrecognized copy failure as-is, without retrying', async () => {
 // enough to reach this rather than an outright open/read failure is hard to
 // construct on demand, so this drives it directly via the mocked
 // `DatabaseSync` above.
-it('reports readable:false when quick_check reports anything other than ok', async () => {
+//
+// Review round item 3: a quick_check failure is retried like an unstable
+// snapshot (it most likely means a tear the before/after stability check's
+// coarser size/mtime comparison missed), not reported immediately — so
+// with `quickCheckOverride.result` fixed for the whole test, every one of
+// the 3 attempts sees the same "bad" result, and only once they're all
+// exhausted does readCacheInfo report it as the final error. Asserting the
+// temp-dir count is what actually proves the retry happened, rather than
+// this just coincidentally being a single-attempt failure with the same
+// message.
+it('retries a quick_check failure like an unstable snapshot, reporting it only once attempts are exhausted', async () => {
+  const fs = await import('node:fs')
   const { run } = await import('../../src/cli/program.js')
   const { seededContext } = await import('../helpers.js')
   const t = seededContext()
@@ -300,4 +300,8 @@ it('reports readable:false when quick_check reports anything other than ok', asy
   const cache = t.json().data.cache
   expect(cache.readable).toBe(false)
   expect(cache.error).toBe('cache integrity check failed: row 3 missing from index meta')
+
+  const created = statusTempDirsCreated(vi.mocked(fs.mkdtempSync))
+  expect(created).toHaveLength(3) // MAX_SNAPSHOT_ATTEMPTS: it really did retry, not fail once
+  for (const dir of created) expect(actualFs.existsSync(dir)).toBe(false)
 })
