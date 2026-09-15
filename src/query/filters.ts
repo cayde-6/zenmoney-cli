@@ -93,6 +93,9 @@ export function resolveCategory(ds: Dataset, query: string): { id: string; path:
   throw new ZmError('INVALID_ARGS', `unknown category: ${query}`, hint)
 }
 
+// Today's ZenMoney-user owner semantics (me/login/id), used only when the
+// family has no owners.yaml at all (ds.ownerNames === null) — see
+// resolveOwnerName below for the owners.yaml-backed replacement.
 export function resolveOwner(ds: Dataset, owner: string | undefined): Set<number> | null {
   if (owner === undefined || owner === 'all') return null
   if (owner === 'me') return new Set([meUser(ds).id])
@@ -104,6 +107,27 @@ export function resolveOwner(ds: Dataset, owner: string | undefined): Set<number
   if (byLogin) return new Set([byLogin.id])
   const hint = `did you mean: ${suggest(ds.users.map(u => u.login ?? String(u.id)), owner).join(', ')}`
   throw new ZmError('INVALID_ARGS', `unknown owner: ${owner}`, hint)
+}
+
+// `--owner` semantics once owners.yaml exists: 'all' (default), 'unassigned',
+// or one of the file's own owner names — the old me/login/id semantics
+// (resolveOwner above) no longer apply. `ownerNames` is `Dataset.ownerNames`,
+// already known non-null by every caller.
+export function resolveOwnerName(ownerNames: string[], owner: string | undefined): string {
+  const value = owner ?? 'all'
+  if (value === 'all' || value === 'unassigned') return value
+  if (ownerNames.includes(value)) return value
+  const hint = `did you mean: ${suggest(ownerNames, value).join(', ')}`
+  throw new ZmError('INVALID_ARGS', `unknown owner: ${value}`, hint)
+}
+
+// Shared by applyFilters and by any command (e.g. `accounts`) that needs to
+// test a single Tx/account owner name against an already-resolved `--owner`
+// value, without repeating the 'all'/'unassigned' special-casing.
+export function ownerNameMatches(resolved: string, ownerName: string | null): boolean {
+  if (resolved === 'all') return true
+  if (resolved === 'unassigned') return ownerName === null
+  return ownerName === resolved
 }
 
 function titleWithId(a: ZmAccount): string {
@@ -186,7 +210,10 @@ export function applyFilters(ds: Dataset, f: Filters, resolved?: ResolvedRefs): 
   const refs = resolved ?? resolveFilterRefs(ds, f)
   const categoryIds = refs.categoryIds
   const accountId = refs.accountId
-  const ownerIds = resolveOwner(ds, f.owner)
+  // owners.yaml present -> name/unassigned/all semantics on Tx.owner;
+  // absent -> today's ZenMoney-user (me/login/id) semantics on Tx.ownerId.
+  const ownerIds = ds.ownerNames === null ? resolveOwner(ds, f.owner) : null
+  const ownerName = ds.ownerNames !== null ? resolveOwnerName(ds.ownerNames, f.owner) : null
   const currency = f.currency?.trim().toLowerCase()
   const search = f.search?.trim().toLowerCase()
 
@@ -197,6 +224,7 @@ export function applyFilters(ds: Dataset, f: Filters, resolved?: ResolvedRefs): 
     if (accountId !== null && t.accountId !== accountId && t.counterpart?.accountId !== accountId) return false
     if (currency !== undefined && t.currency.toLowerCase() !== currency) return false
     if (ownerIds !== null && !ownerIds.has(t.ownerId)) return false
+    if (ownerName !== null && !ownerNameMatches(ownerName, t.owner)) return false
     if (f.type && f.type.length > 0 && !f.type.includes(t.type)) return false
     if (search !== undefined) {
       const haystack = [t.merchant, t.payee, t.comment, t.categoryPath].filter((v): v is string => v !== null).join(' ').toLowerCase()

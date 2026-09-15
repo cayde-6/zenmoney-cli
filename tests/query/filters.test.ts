@@ -1,6 +1,7 @@
 import { it, expect } from 'vitest'
 import { loadDataset, type Dataset } from '../../src/query/model.js'
-import { applyFilters, resolveAccount, resolveCategory, resolveFilterRefs, resolveOwner, resolvePeriod, usedCurrencies } from '../../src/query/filters.js'
+import { applyFilters, resolveAccount, resolveCategory, resolveFilterRefs, resolveOwner, resolveOwnerName, resolvePeriod, usedCurrencies } from '../../src/query/filters.js'
+import { parseOwnersFile } from '../../src/query/owners.js'
 import type { ZmAccount } from '../../src/api/types.js'
 import { fixtureStore } from '../helpers.js'
 
@@ -70,6 +71,35 @@ it('owner', () => {
   expect([...resolveOwner(ds, '11')!]).toEqual([11])
   expect(() => resolveOwner(ds, 'bob')).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
   expect(ids({ month: '2026-09', owner: 'partner' })).toEqual(['t2'])
+})
+it('resolveOwnerName: all (default), unassigned, a known name, and an unknown name with a hint', () => {
+  expect(resolveOwnerName(['alex', 'sam'], undefined)).toBe('all')
+  expect(resolveOwnerName(['alex', 'sam'], 'all')).toBe('all')
+  expect(resolveOwnerName(['alex', 'sam'], 'unassigned')).toBe('unassigned')
+  expect(resolveOwnerName(['alex', 'sam'], 'alex')).toBe('alex')
+  try { resolveOwnerName(['alex', 'sam'], 'ale'); throw new Error('no throw') }
+  catch (e: any) { expect(e.code).toBe('INVALID_ARGS'); expect(e.hint).toMatch(/alex/) }
+})
+// Once owners.yaml exists, --owner switches from ZenMoney-user semantics
+// (me/login/id) to name/unassigned/all semantics, driven by Tx.owner rather
+// than Tx.ownerId — acc-pln -> alex, acc-partner -> sam, everything else
+// (e.g. acc-eur) unassigned.
+it('applyFilters uses owner names instead of ZenMoney users once owners.yaml exists', () => {
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card PLN"]\n  sam:\n    accounts: ["acc-partner"]\n', 'owners.yaml')
+  const dsWithOwners = loadDataset(fixtureStore(), file)
+  const idsWithOwners = (f: any) => applyFilters(dsWithOwners, f).map(t => t.id).sort()
+
+  expect(idsWithOwners({ month: '2026-09', owner: 'alex' })).toEqual(idsWithOwners({ month: '2026-09' }).filter(id =>
+    dsWithOwners.txs.find(t => t.id === id)!.owner === 'alex',
+  ))
+  expect(idsWithOwners({ month: '2026-09', owner: 'sam' })).toEqual(['t2'])
+  expect(idsWithOwners({ month: '2026-09', owner: 'unassigned' }).every(id =>
+    dsWithOwners.txs.find(t => t.id === id)!.owner === null,
+  )).toBe(true)
+  expect(idsWithOwners({ month: '2026-09', owner: 'unassigned' }).length).toBeGreaterThan(0)
+  // Old ZenMoney-user semantics no longer apply: 'me' isn't a valid owner
+  // name in this file, so it's rejected exactly like any other unknown name.
+  expect(() => applyFilters(dsWithOwners, { owner: 'me' })).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
 })
 it('account matches either side, currency, type, search', () => {
   expect(ids({ month: '2026-09', account: 'Card PLN', type: ['transfer'] })).toEqual(['t7'])
