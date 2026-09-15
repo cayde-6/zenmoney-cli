@@ -311,31 +311,43 @@ owners:
 
 Each `accounts` entry matches an account if it equals the account id
 exactly, or matches the account title (after trimming). Title matching has
-two modes: an entry containing at least one letter or digit is a plain
-case-insensitive substring match; a *bare emoji/symbol* entry (no letters
-or digits at all) instead has to align to whole Unicode grapheme-cluster
-boundaries in the title — so a bare "👨" does **not** match inside a
-"👨‍👩 Joint" title (that's one grapheme, a ZWJ-joined family), and a
-skin-toned emoji only matches by its full sequence, never by its bare base
-emoji. **Copy the emoji straight from the account title** (as `zm owners`
-prints it) rather than retyping it — matching is otherwise exact once
-variation selectors are stripped and both sides are Unicode-normalized.
-Only the owner *name* itself is restricted to `[A-Za-z][A-Za-z0-9._-]*`
-(must start with a letter) and can't be `all` or `unassigned` (both are
-reserved `--owner` values once the file exists); it must also be written
-as a real yaml string key (a bare numeric key like `123:` is rejected, not
-silently stringified).
+two modes: an entry containing at least one letter or digit that isn't
+*only* part of a keycap emoji (see below) is a plain case-insensitive
+substring match; a *bare emoji/symbol* entry instead has to align to whole
+Unicode grapheme-cluster boundaries in the title — so a bare "👨" does
+**not** match inside a "👨‍👩 Joint" title (that's one grapheme, a
+ZWJ-joined family), a skin-toned emoji only matches by its full sequence,
+never by its bare base emoji, and a keycap digit (digit + U+FE0F + U+20E3) is never treated
+as if it were the plain text "1". **Copy the emoji straight from the
+account title** (as `zm owners` prints it) rather than retyping it —
+matching is otherwise exact once variation selectors are stripped and both
+sides are Unicode-normalized. (Intl.Segmenter, needed only for this
+grapheme-boundary check, is constructed the first time an emoji/symbol
+entry is actually matched — a plain text-only owners.yaml works even on a
+Node build without full ICU support.) Only the owner *name* itself is
+restricted to `[A-Za-z][A-Za-z0-9._-]*` (must start with a letter), can't
+be `all` or `unassigned` (both are reserved `--owner` values once the file
+exists), must be written as a real yaml string key (a bare numeric key
+like `123:` is rejected, not silently stringified), and can't equal
+another owner's name case-insensitively (`Alex` and `alex` in the same
+file is a hard error — `--owner` matches names case-insensitively, so the
+two would be genuinely ambiguous).
 
 An account matched by entries from two different owners is a hard error
-(`INVALID_ARGS`, naming the account and every matching owner, with a hint
-to pin it to one owner by account id) — *unless* the account is archived,
-in which case the conflict is downgraded to a `warnings` entry and the
-account is treated as unassigned, so one stale closed account can never
-break every other command that opens the cache. An exact account-id entry
-always wins over another owner's mere title match (no conflict in that
-case). An account matched by no entry at all is "unassigned". Matching
-itself always considers every account, archived included — `--archived`
-only ever changes what a command *displays*.
+everywhere except `zm owners` itself (`INVALID_ARGS`, naming the account
+and every matching owner, hint: `pin it to one owner by account id; run zm
+owners to see all conflicts`) — *unless* the account is archived, in which
+case the conflict is downgraded to a `warnings` entry and the account is
+treated as unassigned, so one stale closed account can never break every
+other command that opens the cache. `zm owners` is the exception because
+it's the diagnostic tool that hint points to: instead of failing, it lists
+each non-archived conflict under `data.conflicts: [{ id, title, owners }]`
+(the account appears there only, never also under an owner or in
+`unassigned`) plus a `warnings` entry, and still exits 0. An exact
+account-id entry always wins over another owner's mere title match (no
+conflict in that case). An account matched by no entry at all is
+"unassigned". Matching itself always considers every account, archived
+included — `--archived` only ever changes what a command *displays*.
 
 Once `owners.yaml` exists:
 
@@ -347,7 +359,10 @@ Once `owners.yaml` exists:
   a fuzzy top-3 guess. `zm users` is the one exception: it keeps ZenMoney-
   user semantics for everything *except* rejects any non-`all` value with a
   pointer to `zm owners`, since a family-member owner name has no natural
-  mapping onto ZenMoney's own user list.
+  mapping onto ZenMoney's own user list — and, since that check needs no
+  file content, it reads owners.yaml at all only when `--owner` isn't
+  `all`, so a broken file can never break the default `zm users`
+  invocation.
 - Every `tx` row gains an `owner` field (the owning account's owner name,
   or `null` when unassigned) alongside the existing `ownerId` (always the
   raw ZenMoney user id, regardless of `owners.yaml`).
@@ -356,14 +371,20 @@ Once `owners.yaml` exists:
 - `budget status`, `budget suggest`, `spend`, `income`, `compare`,
   `recurring`, and `tx` all filter by the new `--owner` semantics through
   the shared filter path, and surface any archived-account conflict
-  warning in their own `warnings`.
+  warning in their own `warnings`. Each of these commands' `meta.owner`
+  (or, for `budget status`, its own `owner` meta field) echoes the file's
+  resolved spelling — `--owner ALEX` reports `"alex"` — not the caller's
+  casing.
 
 With no `owners.yaml` at all, every command behaves exactly as before this
-feature — `--owner` keeps its `me|all|<id>|<login>` semantics, `tx.owner`
-is always `null`, and `zm accounts`' `owner` field stays the ZenMoney
-login. A directory (or otherwise unreadable file) at `owners.yaml`'s path,
-or invalid yaml/shape, is a hard `INVALID_ARGS` error naming the path —
-never a silent fallback to "no file".
+feature — `--owner` keeps its `me|all|<id>|<login>` semantics (echoed
+as-is in `meta.owner`), `tx.owner` is always `null`, and `zm accounts`'
+`owner` field stays the ZenMoney login. A directory (or otherwise
+unreadable file) at `owners.yaml`'s path, or invalid yaml/shape, is a hard
+`INVALID_ARGS` error naming the path — never a silent fallback to "no
+file". `zm status`'s `ownersFile.valid` covers parsing only, though: it
+never opens the cache, so it can't detect a genuine matching conflict —
+`zm owners` is where that actually shows up.
 
 **`zm owners`** (reads the local cache and `owners.yaml`, no network — run
 this first to see the current mapping):
@@ -380,27 +401,31 @@ $ zm owners
       { "name": "robin", "accounts": [{ "id": "acc-id-123", "title": "🚗 Robin" }] },
       { "name": "sam", "accounts": [{ "id": "acc-id-456", "title": "Sam" }] }
     ],
-    "unassigned": [{ "id": "acc-id-789", "title": "Joint Savings" }]
+    "unassigned": [{ "id": "acc-id-789", "title": "Joint Savings" }],
+    "conflicts": []
   },
   "meta": { "lastSyncAt": "2026-09-20T12:00:00.000Z" }
 }
 ```
 
-With no `owners.yaml`, `data.file` is `null`, `data.owners` is `[]`, every
-non-archived account is listed under `data.unassigned`, and a `warnings`
-entry explains how to create the file. `--archived` includes archived
-accounts in both `owners[].accounts` and `unassigned`. `--format table`
-renders one `{ owner, id, title }` row per account, with a literal
-`(unassigned)` `owner` for accounts nothing matched. Two more kinds of
-`warnings` help catch a stale or overly-broad `owners.yaml`: an entry that
-matches zero accounts (a likely typo, or a renamed/closed account) — for
-any entry, emoji/symbol included; and, for a *short* text entry only (at
-most 2 letters/digits, e.g. `"Ca"`), one that matches more than half of
-*all* accounts (`entry "x" of owner y matches N of M accounts`). A longer
-text entry, or an emoji/symbol entry, is never flagged for over-matching:
-emoji/symbol entries require an exact whole-grapheme match (see above), so
-they can't over-match by accident — a shared emoji prefix across most or
-all accounts is a common, legitimate naming convention, not noise.
+With no `owners.yaml`, `data.file` is `null`, `data.owners` and
+`data.conflicts` are `[]`, every non-archived account is listed under
+`data.unassigned`, and a `warnings` entry explains how to create the file.
+`--archived` includes archived accounts in both `owners[].accounts` and
+`unassigned`. `--format table` renders one `{ owner, id, title }` row per
+account, with a literal `(unassigned)` `owner` for accounts nothing
+matched (a conflicted account appears in no row at all — only in
+`data.conflicts`). Three kinds of `warnings` help catch a stale, ambiguous,
+or overly-broad `owners.yaml`: a non-archived conflict (see above); an
+entry that matches zero accounts (a likely typo, or a renamed/closed
+account) — for any entry, emoji/symbol included; and, for a *short* text
+entry only (at most 2 letters/digits, e.g. `"Ca"`), one that matches more
+than half of *all* accounts (`entry "x" of owner y matches N of M
+accounts`). A longer text entry, or an emoji/symbol entry, is never
+flagged for over-matching: emoji/symbol entries require an exact
+whole-grapheme match (see above), so they can't over-match by accident —
+a shared emoji prefix across most or all accounts is a common, legitimate
+naming convention, not noise.
 
 ## Budget files
 

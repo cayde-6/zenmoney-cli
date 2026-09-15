@@ -141,67 +141,106 @@ argument), can't be `all`/`unassigned` (reserved) or
 key — `parseOwnersFile` walks the parsed `Document`'s own key nodes (not
 just the plain-JS-object result) to reject a bare numeric/boolean/null key
 that `yaml`'s core schema would otherwise silently resolve to a non-string
-type before it ever reaches a JS object property.
+type before it ever reaches a JS object property. Two names equal
+case-insensitively (`Alex`/`alex`) are also rejected at parse time —
+`--owner` matches names case-insensitively (see below), so the two would
+be genuinely ambiguous to resolve, not merely a style nit.
 
-**Title matching has two modes** (`entryMatchesAccount`): an entry
-containing at least one Unicode letter or digit is a plain
+**Title matching has two modes** (`entryMatchesAccount`), decided by
+`letterOrDigitCount(entry) > 0`: an entry containing at least one Unicode
+letter or digit NOT part of a keycap emoji sequence is a plain
 case-insensitive, trimmed substring match, same as `--account`/
-`--category`. An entry with *no* letters or digits at all (a bare
-emoji/symbol) instead has to align to whole Unicode grapheme-cluster
+`--category`. An entry with no such letter/digit (a bare emoji/symbol,
+keycaps included) instead has to align to whole Unicode grapheme-cluster
 boundaries in the title, using `Intl.Segmenter('grapheme')` — a plain
 code-point substring match would happily match a fragment of a larger
 cluster, e.g. the bare base emoji "👨" inside a "👨‍👩" (man+ZWJ+woman)
-family cluster, or a skin-toned emoji's bare base emoji inside its own
-full modifier+ZWJ sequence. Both sides are NFC-normalized and stripped of
-every U+FE0F (variation selector-16, cosmetic and commonly appended by
-emoji keyboards) before either kind of comparison, so a title/entry
-differing only by that invisible selector still matches. There's no way to
-"partially" match a bare-emoji entry — the intended UX is that a user
-copies the exact emoji straight out of `zm owners`' own account titles.
+family cluster, a skin-toned emoji's bare base emoji inside its own full
+modifier+ZWJ sequence, or the digit "1" inside a keycap (digit +
+optional U+FE0F + U+20E3 combining enclosing keycap — `letterOrDigitCount`
+strips any such sequence before counting, via a `RegExp` built from
+`String.fromCodePoint` results rather than a `/…/` literal containing an
+escaped Unicode character, so this source file can't accidentally embed an
+actual invisible character in place of the intended escape — see the
+git history for exactly that mistake happening once and being caught
+before commit). Both sides are NFC-normalized and stripped of every U+FE0F
+before either kind of comparison, so a title/entry differing only by that
+invisible selector still matches. There's no way to "partially" match a
+bare-emoji entry — the intended UX is that a user copies the exact emoji
+straight out of `zm owners`' own account titles.
 
-**Conflict precedence and archived accounts.** An exact account-id entry
-always wins over a different owner's mere title match for the same account
-— an id is unambiguous by construction, so there's nothing to arbitrate.
-A genuine conflict (two or more owners both matching by id, or none of them
-by id) on a non-archived account is a configuration error (`INVALID_ARGS`,
-naming the account and every matching owner, hinting to pin it by account
-id) rather than a silent, arbitrary pick — but on an *archived* account
-it's downgraded to an entry in `Dataset.ownerWarnings` and the account is
-treated as unassigned instead, so a stale closed account's leftover title
-overlap can never break every other command that opens the cache. Matching
-itself always considers every account, archived included; `--archived`
-only ever changes what a command *displays*. Every command that opens a
-Dataset merges `ownerWarnings` into its own `warnings` output.
+`Intl.Segmenter` itself is constructed fresh inside `graphemes()` on every
+call that actually needs it — never at module load, and never cached in a
+module-level singleton. A Node build without full ICU support (which is
+where `Intl.Segmenter` lives) still works for any owners.yaml with no
+emoji/symbol entries at all, and only fails, with a clear
+`ZmError('UNEXPECTED', 'this Node build lacks Intl.Segmenter (full ICU
+required) for emoji owner entries')`, at the exact moment an emoji/symbol
+entry is genuinely matched — never as an import-time crash that would
+break every command, even ones that never touch owners.yaml.
+
+**Conflict precedence, archived accounts, and `zm owners` itself.** An
+exact account-id entry always wins over a different owner's mere title
+match for the same account — an id is unambiguous by construction, so
+there's nothing to arbitrate. A genuine conflict (two or more owners both
+matching by id, or none of them by id) on a non-archived account is a
+configuration error by default (`matchOwners`' `conflictMode: 'throw'`):
+`INVALID_ARGS`, naming the account and every matching owner, hint `pin it
+to one owner by account id; run zm owners to see all conflicts`. On an
+*archived* account it's always downgraded to an entry in
+`Dataset.ownerWarnings` and the account is treated as unassigned instead,
+so a stale closed account's leftover title overlap can never break every
+other command. `zm owners` is the one caller that passes `conflictMode:
+'collect'` (forwarded through `loadDataset`'s 4th argument) — it's the
+diagnostic tool the default mode's hint points to, so it can't itself fail
+on the very problem it exists to surface: a non-archived conflict there is
+added to `Dataset.ownerConflicts` (`{ id, title, owners }[]`) and a
+warning instead of thrown, and the account is excluded from both
+`owners[].accounts` and `unassigned` — it appears only in
+`data.conflicts`. Matching itself always considers every account, archived
+included; `--archived` only ever changes what a command *displays*. Every
+command that opens a Dataset merges `ownerWarnings` into its own
+`warnings` output.
 
 Once `owners.yaml` exists, `--owner` (`query/filters.ts`'s
 `resolveOwnerName`) switches wholesale from the ZenMoney-user semantics
 above to `all` (default) | `unassigned` | one of the file's own owner
 names, filtering on `Tx.owner` instead of `Tx.ownerId`, matched
-case-insensitively but always resolving to the file's own spelling (so a
-downstream `owner`/`meta.owner` field never echoes the caller's casing).
-An unrecognized name's hint lists every defined owner name outright (not a
-fuzzy top-3 guess, unlike category/account) plus the file's own path —
-useful on its own as a reminder of what's in the file, without a separate
-`zm owners` round-trip. With no `owners.yaml` at all, every command behaves
-exactly as before this feature (`resolveOwner`, `Tx.ownerId`-based). `zm
-users` is deliberately exempt from the *name* semantics — it lists
-ZenMoney's own users, which have no natural mapping onto per-account owner
-names — but once `owners.yaml` exists it also rejects any non-`all` value
-outright (same `rejectOwner` pattern as `categories`/`rates`, with a hint
-pointing to `zm owners`), rather than silently keep applying the old
-me/login/id semantics as if nothing had changed.
+case-insensitively but always resolving to the file's own spelling. A new
+helper, `ownerMetaValue(ds, owner)`, is what every command actually calls
+to build its `meta.owner` (or `budget status`'s `owner` meta field):
+with owners.yaml, it re-resolves through `resolveOwnerName` so the echoed
+value is always the file's spelling (`--owner ALEX` reports back
+`"alex"`), never the caller's casing; with no file, it's the raw value
+unchanged, same as before this helper existed. An unrecognized name's hint
+lists every defined owner name outright (not a fuzzy top-3 guess, unlike
+category/account) plus the file's own path — useful on its own as a
+reminder of what's in the file, without a separate `zm owners`
+round-trip. With no `owners.yaml` at all, every command behaves exactly as
+before this feature (`resolveOwner`, `Tx.ownerId`-based). `zm users` is
+deliberately exempt from the *name* semantics — it lists ZenMoney's own
+users, which have no natural mapping onto per-account owner names — but
+once `owners.yaml` exists it also rejects any non-`all` value outright
+(same `rejectOwner` pattern as `categories`/`rates`, with a hint pointing
+to `zm owners`), rather than silently keep applying the old me/login/id
+semantics as if nothing had changed. That check tests `owner !== 'all'`
+*before* calling `loadOwnersFile` (short-circuiting `&&`), not after, so a
+broken owners.yaml can never break the default, most common `zm users`
+invocation (no `--owner`, or `--owner all`) — the file is read at all only
+when it could actually matter.
 
 `zm owners` (reads the cache and the file, no network) reports the file's
-own `{ name, accounts }` mapping plus which accounts are unassigned, and is
-the first thing an agent should run once `owners.yaml` might exist.
-`--format table` renders one `{ owner, id, title }` row per account (a
-literal `(unassigned)` owner for accounts nothing matched), via the normal
-table mechanism (`flattenOwnersTable`) rather than falling back to a raw
-JSON dump. It also adds two entry-quality warnings (`entryMatchWarnings`),
-over every account (archived included): an entry matching zero accounts
-(almost always a typo or a renamed/closed account, flagged regardless of
-entry kind), and — for a *short* text entry only, at most
-`SHORT_TEXT_ENTRY_MAX_LETTERS_OR_DIGITS` (2) letters/digits after
+own `{ name, accounts }` mapping, which accounts are unassigned, and which
+are in conflict (`conflicts`, see above) — it's the first thing an agent
+should run once `owners.yaml` might exist. `--format table` renders one
+`{ owner, id, title }` row per account (a literal `(unassigned)` owner for
+accounts nothing matched; a conflicted account appears in no row), via the
+normal table mechanism (`flattenOwnersTable`) rather than falling back to
+a raw JSON dump. It also adds two entry-quality warnings
+(`entryMatchWarnings`), over every account (archived included): an entry
+matching zero accounts (almost always a typo or a renamed/closed account,
+flagged regardless of entry kind), and — for a *short* text entry only, at
+most `SHORT_TEXT_ENTRY_MAX_LETTERS_OR_DIGITS` (2) letters/digits after
 trimming, via `query/owners.ts`'s `letterOrDigitCount` — one matching more
 than half of all accounts (`entry "x" of owner y matches N of M
 accounts`). A longer text entry, or any emoji/symbol entry, is never
@@ -219,7 +258,11 @@ exception — `loadOwnersFile` wraps `readFileSync` explicitly for this.
 `zm status` parses the file independently of the cache (which might not
 even exist) and reports `ownersFile: { path, exists, valid, error? }`, so a
 broken `owners.yaml` is visible from the one command that's guaranteed to
-run.
+run. `valid` covers parsing only, though (shape, name rules, yaml syntax):
+`zm status` never opens the cache, so it has no account list to detect a
+genuine matching conflict against — a well-formed file with a would-be
+conflict is still `valid: true` there. `zm owners` is where a conflict (or
+any other matching problem) actually shows up.
 
 ## Caching and stale warning
 
@@ -510,7 +553,15 @@ months, and never suggesting a limit `<= 0`.
   "` — land in one group in both commands; each group displays the label
   spelling from its most recent transaction (ties broken by id).
   `spend --by merchant`'s `(no merchant)` bucket only appears when all four
-  of those fields are empty.
+  of those fields are empty — and that bucket is keyed internally by a
+  dedicated `Symbol`, not the string `'(no merchant)'` itself: a real
+  transaction whose resolved label happens to literally BE that text would
+  otherwise normalize to the exact same string key and silently merge into
+  the true no-merchant group. A symbol can never equal any string a real
+  label produces, ruling the collision out structurally rather than
+  relying on the sentinel text being sufficiently unlikely to appear for
+  real. The displayed `key` is unaffected either way — still the
+  `'(no merchant)'` text for that group.
 - **Owner = the primary side's account, not the raw `user` field.** See
   "Owner semantics" above — this is what makes `--owner` a meaningful
   filter on a shared account rather than an artifact of who happened to

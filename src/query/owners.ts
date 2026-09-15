@@ -155,7 +155,7 @@ const VARIATION_SELECTOR_16 = String.fromCodePoint(0xfe0f)
 const KEYCAP_COMBINING_MARK = String.fromCodePoint(0x20e3)
 const LETTER_OR_DIGIT_RE = /[\p{L}\p{N}]/u
 // A "keycap" emoji sequence: a digit (or `#`/`*`) + optional U+FE0F + the
-// combining enclosing keycap mark (e.g. "1️⃣"). Built via `new RegExp` from
+// combining enclosing keycap mark (e.g. digit "1" + U+FE0F + U+20E3). Built via `new RegExp` from
 // code-point strings, not a `/…/` literal containing an escaped Unicode
 // character, so this source file never risks embedding an actual invisible
 // character in place of the intended escape.
@@ -187,7 +187,7 @@ function graphemes(s: string): string[] {
 }
 
 // How many Unicode letters/digits a (trimmed) entry contains, EXCLUDING any
-// that are only part of a keycap emoji sequence (e.g. the "1" in "1️⃣") —
+// that are only part of a keycap emoji sequence (e.g. the "1" in a "1"+U+FE0F+U+20E3 keycap) —
 // a keycap reads as one emoji character, not text, even though it contains
 // a digit code point. 0 means a symbol/emoji entry (matched only by whole
 // grapheme clusters, see entryMatchesAccount below); `zm owners`' "matches
@@ -223,7 +223,7 @@ function graphemeSequenceMatches(needle: string[], haystack: string[]): boolean 
 //     boundaries in the title (via Intl.Segmenter) — so a bare "man" emoji
 //     does not match inside a "man+ZWJ+woman" family cluster, a skin-toned
 //     emoji only matches by its full sequence, never its bare base emoji,
-//     and a keycap digit ("1️⃣") is never treated as if it were the plain
+//     and a keycap digit ("1"+U+FE0F+U+20E3) is never treated as if it were the plain
 //     text "1". Users should copy the exact emoji from the account title
 //     (as `zm owners` prints it) rather than retyping it from scratch.
 // Both sides are NFC-normalized and stripped of U+FE0F (variation

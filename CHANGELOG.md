@@ -23,37 +23,52 @@ Initial release of `@cayde-6/zenmoney-cli`.
   `--type`, `--search`, and `--limit` filters.
 - **Owners config**: an optional `<configDir>/owners.yaml` maps owner
   names (must start with a letter, `[A-Za-z][A-Za-z0-9._-]*`, a genuine
-  yaml string key) to accounts, by id or by title, for families whose
-  ZenMoney data has no per-account ownership (every
-  account/transaction/tag/merchant carrying the same `user`). A title entry
-  with letters/digits is a case-insensitive substring match; a bare
-  emoji/symbol entry instead has to align to a whole Unicode grapheme
-  cluster in the title (so a bare emoji never matches a fragment of a
-  larger ZWJ/skin-tone sequence), normalizing NFC and stripping variation
-  selectors first. An exact account-id entry wins over another owner's
-  title match; a genuine conflict is a hard error naming the account and
-  every matching owner, except on an archived account, where it's a
-  warning (account treated as unassigned) instead of failing the command.
-  Once the file exists, `--owner` switches from ZenMoney-user semantics
+  yaml string key, and can't equal another name case-insensitively) to
+  accounts, by id or by title, for families whose ZenMoney data has no
+  per-account ownership (every account/transaction/tag/merchant carrying
+  the same `user`). A title entry with a letter/digit not part of a
+  keycap emoji sequence is a case-insensitive substring match; a bare
+  emoji/symbol entry (keycaps included) instead has to align to a whole
+  Unicode grapheme cluster in the title (so a bare emoji never matches a
+  fragment of a larger ZWJ/skin-tone/keycap sequence), normalizing NFC and
+  stripping variation selectors first — `Intl.Segmenter`, needed only for
+  this, is constructed on first actual use, so a Node build without full
+  ICU support still works for any file with no emoji/symbol entries. An
+  exact account-id entry wins over another owner's title match; a genuine
+  conflict is a hard error naming the account and every matching owner
+  (hint: pin it by account id, run `zm owners` to see all conflicts) —
+  except on an archived account, where it's a warning (account treated as
+  unassigned) instead of failing the command, and except in `zm owners`
+  itself, which never fails on a conflict (it's the diagnostic tool that
+  hint points to): a non-archived conflict there is reported via
+  `data.conflicts: [{ id, title, owners }]` and a warning, exit 0. Once
+  the file exists, `--owner` switches from ZenMoney-user semantics
   (`me|<id>|<login>`) to `all`|`unassigned`|a file owner name (matched
-  case-insensitively) everywhere except `zm users`, which rejects any
-  non-`all` value outright once the file is active (no natural mapping
-  onto file owner names) with a hint pointing to `zm owners`; an unknown
-  name's hint lists every defined name plus the file's path. `tx` gains an
-  `owner` field alongside the existing `ownerId`; `zm accounts`' `owner`
-  field reports the file's owner name instead of the ZenMoney login; and
-  the new `zm owners` command (no network) reports the file's own
-  `{ name, accounts }` mapping plus which accounts are unassigned,
-  `--format table` as `{ owner, id, title }` rows, and warns about an entry
-  matching zero accounts (any entry), or a *short* text entry (at most 2
-  letters/digits) matching more than half of all accounts — a longer text
-  entry or any emoji/symbol entry is never flagged for over-matching, since
-  a shared emoji-prefix naming convention across most accounts is common
-  and legitimate, not a mistake. `zm status`
-  reports `ownersFile: { path, exists, valid, error? }`, parsed
-  independently of the cache. A directory or otherwise unreadable
-  owners.yaml is a clear `INVALID_ARGS` naming the path. With no
-  `owners.yaml`, every command behaves exactly as before.
+  case-insensitively, resolving to the file's own spelling) everywhere
+  except `zm users`, which rejects any non-`all` value outright once the
+  file is active (no natural mapping onto file owner names) with a hint
+  pointing to `zm owners` — and reads the file at all only when `--owner`
+  isn't `all`, so a broken file can't break the default invocation; an
+  unknown name's hint lists every defined name plus the file's path.
+  `tx`/`spend`/`income`/`compare`/`recurring`/`budget status` gain an
+  `owner` field/meta echoing the file's resolved spelling (`--owner ALEX`
+  reports `"alex"`), and `tx` also gains an `owner` field on each row
+  alongside the existing `ownerId`; `zm accounts`' `owner` field reports
+  the file's owner name instead of the ZenMoney login; and the new
+  `zm owners` command (no network) reports the file's own
+  `{ name, accounts }` mapping, which accounts are unassigned, and which
+  are in conflict, `--format table` as `{ owner, id, title }` rows, and
+  warns about a non-archived conflict, an entry matching zero accounts
+  (any entry), or a *short* text entry (at most 2 letters/digits) matching
+  more than half of all accounts — a longer text entry or any emoji/symbol
+  entry is never flagged for over-matching, since a shared emoji-prefix
+  naming convention across most accounts is common and legitimate, not a
+  mistake. `zm status` reports `ownersFile: { path, exists, valid,
+  error? }`, parsed independently of the cache (`valid` covers parsing
+  only — a matching conflict needs the cache, so it only shows up via
+  `zm owners`). A directory or otherwise unreadable owners.yaml is a clear
+  `INVALID_ARGS` naming the path. With no `owners.yaml`, every command
+  behaves exactly as before.
 - **Analytics**: `zm spend` (by category/month/merchant, with `--tree`),
   `zm income` (by category/month), `zm compare` (two periods, by total or
   category), `zm recurring` (subscription/recurring-payment detection).
@@ -133,6 +148,13 @@ Initial release of `@cayde-6/zenmoney-cli`.
 
 ### Fixed
 
+- `spend --by merchant`'s `(no merchant)` bucket is now keyed internally
+  by a dedicated `Symbol`, not the string `'(no merchant)'` itself — a
+  real transaction whose resolved merchant/payee/originalPayee/comment
+  label happened to literally be that text would otherwise normalize to
+  the same string key and silently merge into the true no-merchant group,
+  understating one and overstating the other. The displayed group `key`
+  is unaffected either way.
 - A relative `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` is ignored (falls back to
   the default), per the XDG Base Directory spec, instead of being joined
   as-is into a path relative to the process's working directory.

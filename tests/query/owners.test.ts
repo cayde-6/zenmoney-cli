@@ -24,7 +24,7 @@ const SKIN_LIGHT = String.fromCodePoint(0x1f3fb)
 const FEMALE_SIGN = String.fromCodePoint(0x2640)
 const MERMAID_LIGHT_FEMALE = MERMAID + SKIN_LIGHT + ZWJ + FEMALE_SIGN + FE0F // one grapheme cluster
 const KEYCAP_MARK = String.fromCodePoint(0x20e3) // combining enclosing keycap
-const KEYCAP_ONE = '1' + FE0F + KEYCAP_MARK // "1️⃣" — a keycap digit sequence
+const KEYCAP_ONE = '1' + FE0F + KEYCAP_MARK // digit "1" + U+FE0F + U+20E3 — a keycap digit sequence
 
 it('parses a well-formed owners file', () => {
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card Alex", "acc-id-123"]\n  sam:\n    accounts: ["Sam"]\n', 'owners.yaml')
@@ -297,7 +297,7 @@ it('a keycap entry is matched by whole-grapheme alignment, not as a substring te
   const file = parseOwnersFile(`owners:\n  alex:\n    accounts: ["${KEYCAP_ONE}"]\n`, 'owners.yaml')
   expect(matchOwners(withKeycap, file).ownerOf.get('acc-1')).toBe('alex')
   // A title with only the bare digit (no keycap marks at all) is a
-  // DIFFERENT grapheme cluster ("1" alone vs. the full "1️⃣" cluster) — if
+  // DIFFERENT grapheme cluster ("1" alone vs. the full keycap cluster) — if
   // the keycap entry were instead treated as text and substring-matched,
   // this would incorrectly match too.
   const withBareDigit = new Map([['acc-2', account('acc-2', '1 Card')]])

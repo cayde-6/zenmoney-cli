@@ -53,7 +53,10 @@ those is available.
   login (see `zm users`). Don't guess which mode applies — `zm owners`
   tells you directly, and an unrecognized `--owner` value exits 2 with a
   hint listing every defined owner name (not a fuzzy guess) once
-  `owners.yaml` exists.
+  `owners.yaml` exists. In that mode, a command's `meta.owner` (or `owner`
+  meta field) always echoes the file's own spelling — `--owner ALEX`
+  reports back `"alex"` — not whatever casing you passed, so trust that
+  field over your own input when reporting what was actually filtered.
 - If `zm owners`' `data.owners[].accounts[].title` contains an emoji, and
   you need to write an `owners.yaml` entry that matches it, **copy the
   emoji exactly from that title** rather than retyping it — a bare emoji
@@ -61,10 +64,15 @@ those is available.
   a ZWJ family sequence), never a fragment of one. `zm owners`' `warnings`
   flag an entry that ends up matching zero accounts, so a mistyped one
   is never silently a no-op.
-- A `zm owners` (or any owner-filtered command's) conflict — two owners'
-  entries both matching the same account — exits 2 (`INVALID_ARGS`) unless
-  the account is archived, in which case it's a `warnings` entry and the
-  account is treated as unassigned instead of failing the command.
+- A conflict (two owners' entries both matching the same account) exits 2
+  (`INVALID_ARGS`, hint: run `zm owners`) in every owner-aware command
+  **except `zm owners` itself**, which never fails on one — it's the
+  diagnostic tool the hint points to, so it reports each non-archived
+  conflict via `data.conflicts: [{ id, title, owners }]` (that account
+  appears there only, not under any owner or in `unassigned`) plus a
+  `warnings` entry, and still exits 0. An archived-only conflict is always
+  just a `warnings` entry with the account treated as unassigned,
+  everywhere.
 - **Never add amounts in different currencies.** All sums and aggregates are
   reported per currency, on purpose — a total across currencies is not a
   correct number. If the user needs one total, run `zm rates`, convert
@@ -126,7 +134,7 @@ Run `zm <command> --help` for the exact flags and examples of any command.
 | `zm status` | – | `{ cache: { path, exists, readable, lastSyncAt, ageHours, error? }, token: { source: "env"\|"keychain"\|"config"\|null }, configDir, budgetDir, ownersFile: { path, exists, valid, error? }, version }` — no network call, works with no token and no cache, never writes to the real cache file or its directory (reads a private temp copy instead, including any uncheckpointed WAL data; a copy torn by a concurrent write is retried a few times before `readable: false`), never prints the token itself, only its `source`; `ownersFile.valid` is `false` (with an `error`) for a broken/unreadable owners.yaml, checked independent of the cache |
 | `zm users` | – | `[{ id, login, currency, isMain }]` |
 | `zm accounts` | `--archived` | `[{ id, title, type, currency, balance, inBalance, archived, owner }]` — `owner` is the `owners.yaml` owner name (or `null` if unassigned) once that file exists, else the ZenMoney login |
-| `zm owners` | `--archived` | `{ file: path\|null, owners: [{ name, accounts: [{ id, title }] }], unassigned: [{ id, title }] }` — reads the cache and `owners.yaml`, no network; run this first before using `--owner` by name (see "Rules for agents" above); `--format table` renders `{ owner, id, title }` rows, `(unassigned)` for unassigned accounts; `warnings` flag an entry matching zero accounts (any entry), a *short* text entry (<= 2 letters/digits) matching more than half of all accounts, and an archived-account conflict resolved as unassigned — a longer text entry or an emoji/symbol entry is never flagged for over-matching (emoji/symbol entries require an exact whole-grapheme match, so a shared emoji-prefix convention across most accounts is expected, not noise) |
+| `zm owners` | `--archived` | `{ file: path\|null, owners: [{ name, accounts: [{ id, title }] }], unassigned: [{ id, title }], conflicts: [{ id, title, owners }] }` — reads the cache and `owners.yaml`, no network; run this first before using `--owner` by name (see "Rules for agents" above); never fails on a non-archived conflict (see "Rules for agents") — that account shows up only in `conflicts`, never under an owner or in `unassigned`; `--format table` renders `{ owner, id, title }` rows (conflicted accounts appear in no row), `(unassigned)` for unassigned accounts; `warnings` flag a non-archived conflict, an entry matching zero accounts (any entry), a *short* text entry (<= 2 letters/digits) matching more than half of all accounts, and an archived-account conflict resolved as unassigned — a longer text entry or an emoji/symbol entry is never flagged for over-matching (emoji/symbol entries require an exact whole-grapheme match, so a shared emoji-prefix convention across most accounts is expected, not noise) |
 | `zm categories` | `--tree` | `[{ id, path, parentId, kind }]`, or nested `{ ...,children: [...] }` with `--tree` |
 | `zm rates` | – | `[{ currency, rate }]` relative to the main user's currency; `meta.note` marks it as current, not historical |
 | `zm tx` | `--from/--to/--month`, `--category/--account/--currency`, `--type`, `--search`, `--limit` (default 100) | `[{ id, date, type, amount, currency, categoryPath, merchant, payee, accountTitle, hold, originalPayee, ownerId, owner, ... }]` — `hold` (boolean) marks a not-yet-settled ZenMoney transaction, counted normally; `owner` is the `owners.yaml` owner name (`null` with no file or when unassigned), independent of `ownerId` (always the raw ZenMoney user id); `meta.total`/`meta.returned` say whether the list was cut off |
