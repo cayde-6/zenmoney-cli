@@ -1,10 +1,13 @@
 import type { Tx } from '../query/model.js'
-import { addMonths, monthOf, round2, localMonth } from '../util.js'
+import { addMonths, compareNames, monthOf, round2, localMonth } from '../util.js'
 
+// The index signature makes this directly usable as a `--format table` row
+// (Record<string, string | number | null>) with no cast needed.
 export interface RecurringItem {
   merchant: string; categoryPath: string; currency: string
   monthsSeen: number; windowMonths: number; avgAmount: number; lastAmount: number; lastDate: string
   periodicity: 'monthly' | 'irregular'
+  [field: string]: string | number | null
 }
 
 // The `months`-wide window ending at the calendar month of `now`, as YYYY-MM strings.
@@ -83,5 +86,5 @@ export function findRecurring(txs: Tx[], opts: { months: number; now: Date; minM
     })
   }
 
-  return items.sort((a, b) => a.currency.localeCompare(b.currency) || b.avgAmount - a.avgAmount)
+  return items.sort((a, b) => compareNames(a.currency, b.currency) || b.avgAmount - a.avgAmount)
 }

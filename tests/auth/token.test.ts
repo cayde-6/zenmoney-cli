@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest'
-import { mkdtempSync, statSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, statSync, readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { resolveToken, saveToken, removeToken, requireToken, macKeychain, type Keychain, type ExecFn } from '../../src/auth/token.js'
@@ -23,6 +23,22 @@ it('saves to config with mode 600 when no keychain', () => {
   expect(statSync(f).mode & 0o777).toBe(0o600)
   expect(JSON.parse(readFileSync(f, 'utf8'))).toEqual({ token: 'c' })
   expect(resolveToken({ env: {}, keychain: null, configFile: f })).toBe('c')
+})
+it('creates the config dir with mode 700', () => {
+  const f = cfg()
+  saveToken('c', { env: {}, keychain: null, configFile: f })
+  expect(statSync(dirname(f)).mode & 0o777).toBe(0o700)
+})
+it('writes config atomically (temp file, then rename) and leaves no temp file behind', () => {
+  const f = cfg()
+  saveToken('c', { env: {}, keychain: null, configFile: f })
+  const entries = readdirSync(dirname(f))
+  expect(entries).toEqual(['config.json'])
+})
+it('skips chmod on win32 without throwing', () => {
+  const f = cfg()
+  expect(saveToken('c', { env: {}, keychain: null, configFile: f, platform: 'win32' })).toBe('config')
+  expect(JSON.parse(readFileSync(f, 'utf8'))).toEqual({ token: 'c' })
 })
 it('saves to keychain when available, removeToken clears both', () => {
   const f = cfg(), k = memKeychain()

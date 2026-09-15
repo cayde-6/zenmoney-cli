@@ -1,11 +1,32 @@
 import type { Command } from 'commander'
+import { unlinkSync } from 'node:fs'
 import type { AppContext } from '../context.js'
 import { formatOf } from '../program.js'
 import { printResult } from '../output.js'
-import { fetchDiff } from '../../api/client.js'
+import { fetchDiff, parseTimeoutMs } from '../../api/client.js'
 import { requireToken, removeToken, saveToken, validateTokenChars } from '../../auth/token.js'
 import { Store } from '../../store/store.js'
 import { ZmError } from '../../errors.js'
+
+// `sync --full` must recover from a corrupted cache rather than requiring the
+// user to delete it by hand first: if opening it fails with the corruption
+// flavor of NO_CACHE (see Store.open), delete the file (and any WAL/SHM
+// sidecar files WAL mode may have left behind) and recreate it before
+// fetching. A non-`--full` sync still surfaces NO_CACHE as-is — only `--full`
+// is explicitly a "start over" operation.
+function openStoreForSync(ctx: AppContext, full: boolean): Store {
+  try {
+    return Store.open(ctx.paths.cacheDb, { platform: ctx.platform })
+  } catch (e) {
+    if (full && e instanceof ZmError && e.code === 'NO_CACHE') {
+      for (const suffix of ['', '-wal', '-shm']) {
+        try { unlinkSync(ctx.paths.cacheDb + suffix) } catch { /* may not exist */ }
+      }
+      return Store.open(ctx.paths.cacheDb, { platform: ctx.platform })
+    }
+    throw e
+  }
+}
 
 // Pure keystroke-by-keystroke state machine behind promptHidden's raw-mode TTY
 // reading, kept separate so it's unit-testable without a real terminal.
@@ -82,12 +103,29 @@ export function applyKeystrokes(
   return { value, done: false, cancelled: false }
 }
 
-// Untested: no test in this task drives an actual TTY. Prompts on stderr and
-// reads raw keystrokes from stdin (rawMode so the terminal itself never echoes
-// the token), applying them via the unit-tested applyKeystrokes() above.
-async function promptHidden(_ctx: AppContext, prompt: string): Promise<string> {
-  process.stderr.write(prompt)
-  const stdin = process.stdin
+// The minimal slice of process.stdin's raw-mode-TTY interface promptHidden
+// actually uses — narrowed to a named interface so tests can pass a fake
+// async-iterable stream instead of a real terminal.
+export interface HiddenInputStream {
+  setRawMode(mode: boolean): void
+  resume(): void
+  pause(): void
+  setEncoding(encoding: BufferEncoding): void
+  [Symbol.asyncIterator](): AsyncIterableIterator<string>
+}
+
+// Prompts on stderr and reads raw keystrokes from stdin (rawMode so the
+// terminal itself never echoes the token), applying them via the
+// unit-tested applyKeystrokes() above. `deps` defaults to the real
+// stdin/stderr — every real call site (registerSync's `auth` action below)
+// calls promptHidden with no deps, so this is purely a testability seam.
+export async function promptHidden(
+  prompt: string,
+  deps: { stdin?: HiddenInputStream; writeErr?: (s: string) => void } = {},
+): Promise<string> {
+  const stdin = deps.stdin ?? (process.stdin as unknown as HiddenInputStream)
+  const writeErr = deps.writeErr ?? ((s: string) => { process.stderr.write(s) })
+  writeErr(prompt)
   stdin.setRawMode(true)
   stdin.resume()
   stdin.setEncoding('utf8')
@@ -100,7 +138,7 @@ async function promptHidden(_ctx: AppContext, prompt: string): Promise<string> {
       pending = result.pending ?? ''
       if (result.done) {
         if (result.cancelled) throw new ZmError('INVALID_ARGS', 'cancelled')
-        process.stderr.write('\n')
+        writeErr('\n')
         return buffer
       }
     }
@@ -112,7 +150,7 @@ async function promptHidden(_ctx: AppContext, prompt: string): Promise<string> {
 }
 
 export function registerSync(program: Command, ctx: AppContext): void {
-  const tokenDeps = () => ({ env: ctx.env, keychain: ctx.keychain, configFile: ctx.paths.configFile })
+  const tokenDeps = () => ({ env: ctx.env, keychain: ctx.keychain, configFile: ctx.paths.configFile, platform: ctx.platform })
 
   program.command('auth')
     .description('Validate and store a ZenMoney API token (or remove it with --logout)')
@@ -123,7 +161,10 @@ export function registerSync(program: Command, ctx: AppContext): void {
       const format = formatOf(cmd)
       if (opts.logout) {
         removeToken(tokenDeps())
-        printResult({ data: { removed: true }, meta: {} }, format, ctx.stdout)
+        const warnings = ctx.env.ZENMONEY_TOKEN?.trim()
+          ? ['ZENMONEY_TOKEN is still set in the environment and will be used']
+          : []
+        printResult({ data: { removed: true }, meta: {}, ...(warnings.length ? { warnings } : {}) }, format, ctx.stdout)
         return
       }
       // A missing --token, read from stdin (piped input, not a terminal), gets a
@@ -135,7 +176,7 @@ export function registerSync(program: Command, ctx: AppContext): void {
         token = opts.token.trim()
         if (!token) throw new ZmError('INVALID_ARGS', 'empty token')
       } else if (ctx.isTTY) {
-        token = (await promptHidden(ctx, 'ZenMoney token: ')).trim()
+        token = (await promptHidden('ZenMoney token: ')).trim()
         if (!token) throw new ZmError('INVALID_ARGS', 'empty token')
       } else {
         token = (await ctx.readStdin()).trim()
@@ -146,7 +187,8 @@ export function registerSync(program: Command, ctx: AppContext): void {
       // reaching ZenMoney first, both to fail fast and so the token never ends
       // up in a request that could echo it back in an error message.
       validateTokenChars(token)
-      await fetchDiff(token, Math.floor(ctx.now().getTime() / 1000), { fetch: ctx.fetch, now: ctx.now })
+      const timeoutMs = parseTimeoutMs(ctx.env)
+      await fetchDiff(token, Math.floor(ctx.now().getTime() / 1000), { fetch: ctx.fetch, now: ctx.now, timeoutMs })
       printResult({ data: { saved: saveToken(token, tokenDeps()) }, meta: {} }, format, ctx.stdout)
     })
 
@@ -157,16 +199,17 @@ export function registerSync(program: Command, ctx: AppContext): void {
     .action(async (opts, cmd) => {
       const format = formatOf(cmd)
       const token = requireToken(tokenDeps())
+      const timeoutMs = parseTimeoutMs(ctx.env)
+      const full = Boolean(opts.full)
       // Unlike ctx.openStore() (for read commands), sync must work before any cache
       // exists, so it opens the cache file directly rather than requiring NO_CACHE.
-      const store = Store.open(ctx.paths.cacheDb)
+      const store = openStoreForSync(ctx, full)
       try {
-        const full = Boolean(opts.full)
         // Fetch before touching the cache: if this throws (network/auth failure),
         // the existing cache must be left exactly as it was. --full's reset then
         // happens inside the same transaction as the upsert (see Store.applyDiff),
         // so a successful sync never leaves the store empty either.
-        const diff = await fetchDiff(token, full ? 0 : store.getMeta().serverTimestamp, { fetch: ctx.fetch, now: ctx.now })
+        const diff = await fetchDiff(token, full ? 0 : store.getMeta().serverTimestamp, { fetch: ctx.fetch, now: ctx.now, timeoutMs })
         const stats = store.applyDiff(diff, ctx.now(), full ? { reset: true } : undefined)
         printResult({ data: { ...stats, full }, meta: { lastSyncAt: store.getMeta().lastSyncAt } }, format, ctx.stdout)
       } finally {

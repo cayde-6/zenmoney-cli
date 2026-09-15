@@ -2,7 +2,7 @@ import type { Dataset, Tx } from '../query/model.js'
 import { isSpendTx, spendSign } from '../query/model.js'
 import { resolveCategory } from '../query/filters.js'
 import { spendBy, type Group } from '../analytics/spend.js'
-import { round1, round2, daysInMonth, localMonth } from '../util.js'
+import { compareNames, round1, round2, daysInMonth, localMonth } from '../util.js'
 import { ZmError } from '../errors.js'
 import type { LimitSpec } from './files.js'
 
@@ -11,7 +11,38 @@ export interface StatusRow {
   planned: number; spent: number; spentOtherCurrencies: Array<{ currency: string; amount: number }>
   remaining: number; usedPct: number | null; monthElapsedPct: number; pace: number | null
 }
-export interface BudgetStatus { month: string; monthElapsedPct: number; rows: StatusRow[]; unplanned: Group[] }
+export interface UnresolvedLimit { key: string; amount: number; currency: string }
+export interface BudgetStatus { month: string; monthElapsedPct: number; rows: StatusRow[]; unplanned: Group[]; unresolved: UnresolvedLimit[] }
+
+// A limit key that no longer resolves to any category (e.g. the category was
+// renamed or deleted in ZenMoney since the budget file was written) is
+// skipped with a warning rather than failing the whole command — unlike an
+// ambiguous key or any other resolveCategory failure, which still propagates
+// as a hard error. Returns the still-resolvable subset of `limits`, alongside
+// the unresolved ones (for `data.unresolved`) and their warning messages.
+export function unresolvedLimits(
+  ds: Dataset,
+  limits: Map<string, LimitSpec>,
+  keySources: Map<string, string>,
+): { resolvable: Map<string, LimitSpec>; unresolved: UnresolvedLimit[]; warnings: string[] } {
+  const resolvable = new Map<string, LimitSpec>()
+  const unresolved: UnresolvedLimit[] = []
+  const warnings: string[] = []
+  for (const [key, limit] of limits) {
+    try {
+      resolveCategory(ds, key)
+      resolvable.set(key, limit)
+    } catch (e) {
+      if (e instanceof ZmError && e.code === 'INVALID_ARGS' && e.message.startsWith('unknown category:')) {
+        unresolved.push({ key, amount: limit.amount, currency: limit.currency })
+        warnings.push(`unknown budget category "${key}" in ${keySources.get(key) ?? 'budget file'}, skipped`)
+        continue
+      }
+      throw e
+    }
+  }
+  return { resolvable, unresolved, warnings }
+}
 
 export function monthElapsedPct(month: string, now: Date): number {
   const current = localMonth(now)
@@ -22,7 +53,14 @@ export function monthElapsedPct(month: string, now: Date): number {
 
 interface RowAccum { category: string; categoryId: string; planned: LimitSpec; totals: Map<string, number> }
 
-export function budgetStatus(ds: Dataset, limits: Map<string, LimitSpec>, monthTxs: Tx[], month: string, now: Date): BudgetStatus {
+export function budgetStatus(
+  ds: Dataset,
+  limits: Map<string, LimitSpec>,
+  monthTxs: Tx[],
+  month: string,
+  now: Date,
+  unresolved: UnresolvedLimit[] = [],
+): BudgetStatus {
   const elapsed = monthElapsedPct(month, now)
 
   const rowById = new Map<string, RowAccum>()
@@ -60,7 +98,7 @@ export function budgetStatus(ds: Dataset, limits: Map<string, LimitSpec>, monthT
         .filter(([currency]) => currency !== acc.planned.currency)
         .map(([currency, amount]) => ({ currency, amount: round2(amount) }))
         .filter(a => a.amount !== 0)
-        .sort((a, b) => a.currency.localeCompare(b.currency))
+        .sort((a, b) => compareNames(a.currency, b.currency))
       const remaining = round2(acc.planned.amount - spent)
       const usedPct = acc.planned.amount > 0 ? round1((spent / acc.planned.amount) * 100) : null
       const pace = usedPct === null ? null : round1(usedPct - elapsed)
@@ -70,9 +108,9 @@ export function budgetStatus(ds: Dataset, limits: Map<string, LimitSpec>, monthT
         remaining, usedPct, monthElapsedPct: elapsed, pace,
       }
     })
-    .sort((a, b) => a.category.localeCompare(b.category, 'ru'))
+    .sort((a, b) => compareNames(a.category, b.category))
 
   const unplanned = spendBy(unplannedTxs, 'category')
 
-  return { month, monthElapsedPct: elapsed, rows, unplanned }
+  return { month, monthElapsedPct: elapsed, rows, unplanned, unresolved }
 }

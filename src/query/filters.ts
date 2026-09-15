@@ -9,7 +9,9 @@ export interface Filters {
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
-const MONTH_RE = /^\d{4}-\d{2}$/
+// Shared with analytics/compare.ts's parsePeriod, which also needs to tell a
+// bare YYYY-MM apart from a YYYY-MM-DD..YYYY-MM-DD range before validating it.
+export const MONTH_RE = /^\d{4}-\d{2}$/
 
 // Regex only checks shape; a calendar-invalid value like 2026-02-30 or a month
 // like 2026-13 must still round-trip through Date to be accepted.
@@ -55,8 +57,11 @@ function collectDescendants(id: string, tags: Dataset['tags']): Set<string> {
   return ids
 }
 
-function allCategoryPaths(ds: Dataset): { id: string; path: string }[] {
-  return [...ds.tags.values()].map(tag => ({ id: tag.id, path: categoryPath(tag.id, ds.tags) }))
+// `leaf` is the tag's own (trimmed) title, not a segment split out of `path` —
+// a title can itself contain "/" (e.g. "Phone/Internet"), and splitting the
+// joined path on "/" would then extract the wrong, partial "leaf" text.
+function allCategoryPaths(ds: Dataset): { id: string; path: string; leaf: string }[] {
+  return [...ds.tags.values()].map(tag => ({ id: tag.id, path: categoryPath(tag.id, ds.tags), leaf: tag.title.trim() }))
 }
 
 export function resolveCategory(ds: Dataset, query: string): { id: string; path: string; ids: Set<string> } {
@@ -75,10 +80,7 @@ export function resolveCategory(ds: Dataset, query: string): { id: string; path:
   const byId = all.find(c => c.id.toLowerCase() === q)
   if (byId) return { id: byId.id, path: byId.path, ids: collectDescendants(byId.id, ds.tags) }
 
-  const byLeaf = all.filter(c => {
-    const leaf = c.path.split('/').pop() ?? ''
-    return leaf.toLowerCase() === q
-  })
+  const byLeaf = all.filter(c => c.leaf.toLowerCase() === q)
   if (byLeaf.length === 1) {
     const match = byLeaf[0]!
     return { id: match.id, path: match.path, ids: collectDescendants(match.id, ds.tags) }
@@ -132,26 +134,58 @@ export function resolveAccount(ds: Dataset, query: string): ZmAccount {
   throw new ZmError('INVALID_ARGS', `unknown account: ${query}`, hint)
 }
 
+// Every currency (instrument shortTitle) actually in use in the dataset: any
+// account's own currency, plus both sides of every non-deleted transaction
+// (ds.txs already excludes deleted ones) — a transfer/debt's counterpart
+// currency is only visible via Tx.counterpart, not instrument ids, since
+// loadDataset already resolved those to shortTitles. Shared by
+// currencyWarnings below and by `zm rates`.
+export function usedCurrencies(ds: Dataset): Set<string> {
+  const used = new Set<string>()
+  for (const a of ds.accounts.values()) {
+    const title = a.instrument !== null ? ds.instruments.get(a.instrument)?.shortTitle : undefined
+    if (title) used.add(title)
+  }
+  for (const t of ds.txs) {
+    used.add(t.currency)
+    if (t.counterpart) used.add(t.counterpart.currency)
+  }
+  return used
+}
+
 // A `--currency` that matches no instrument actually used by any account or
 // transaction is almost always a typo (e.g. wrong case, or a currency this
 // ZenMoney account never touched) — the filter itself still runs (and quietly
 // returns nothing), but this surfaces a warning instead of a silent empty result.
 export function currencyWarnings(ds: Dataset, currency: string | undefined): string[] {
   if (currency === undefined) return []
-  const known = new Set<string>()
-  for (const a of ds.accounts.values()) {
-    const title = a.instrument !== null ? ds.instruments.get(a.instrument)?.shortTitle : undefined
-    if (title) known.add(title.toLowerCase())
-  }
-  for (const t of ds.txs) known.add(t.currency.toLowerCase())
+  const known = new Set([...usedCurrencies(ds)].map(c => c.toLowerCase()))
   if (known.has(currency.trim().toLowerCase())) return []
   return [`unknown currency: ${currency}`]
 }
 
-export function applyFilters(ds: Dataset, f: Filters): Tx[] {
+// `--category`/`--account` resolution (and the ZmError it can throw for an
+// unknown/ambiguous query) as a single step, shared by applyFilters and by
+// the command's own `meta.category`/`meta.account` — resolving twice per
+// command (once here, once again inside applyFilters) would do the same
+// tag/account lookup work twice for every invocation.
+export interface ResolvedRefs { categoryPath: string | null; categoryIds: Set<string> | null; accountId: string | null }
+
+export function resolveFilterRefs(ds: Dataset, f: Pick<Filters, 'category' | 'account'>): ResolvedRefs {
+  const category = f.category ? resolveCategory(ds, f.category) : null
+  const account = f.account ? resolveAccount(ds, f.account) : null
+  return {
+    categoryPath: category?.path ?? null,
+    categoryIds: category?.ids ?? null,
+    accountId: account?.id ?? null,
+  }
+}
+
+export function applyFilters(ds: Dataset, f: Filters, resolved?: ResolvedRefs): Tx[] {
   const { from, to } = resolvePeriod(f)
-  const categoryIds = f.category ? resolveCategory(ds, f.category).ids : null
-  const accountId = f.account ? resolveAccount(ds, f.account).id : null
+  const refs = resolved ?? resolveFilterRefs(ds, f)
+  const categoryIds = refs.categoryIds
+  const accountId = refs.accountId
   const ownerIds = resolveOwner(ds, f.owner)
   const currency = f.currency?.trim().toLowerCase()
   const search = f.search?.trim().toLowerCase()

@@ -1,3 +1,13 @@
+// Shared collator for every sort of names/paths/keys (categories, accounts,
+// currencies, merchants, ...): a fixed locale ('en') makes ordering
+// deterministic regardless of the process's LANG, while still handling
+// Cyrillic (and any other script) titles sensibly at runtime.
+const collator = new Intl.Collator('en')
+
+export function compareNames(a: string, b: string): number {
+  return collator.compare(a, b)
+}
+
 export function round2(n: number): number {
   return Math.round(n * 100) / 100
 }

@@ -13,7 +13,7 @@ it('finds monthly subscription', () => {
   // appearance through the month before now (06..08, 09 being the current,
   // possibly-incomplete month) — so it still counts as monthly.
   expect(findRecurring(ds.txs, { months: 6, now })).toEqual([
-    { merchant: 'Netflix', categoryPath: 'Подписки', currency: 'EUR', monthsSeen: 4, windowMonths: 6, avgAmount: 12, lastAmount: 12, lastDate: '2026-09-15', periodicity: 'monthly' },
+    { merchant: 'Netflix', categoryPath: 'Subscriptions', currency: 'EUR', monthsSeen: 4, windowMonths: 6, avgAmount: 12, lastAmount: 12, lastDate: '2026-09-15', periodicity: 'monthly' },
   ])
 })
 it('irregular when a month is skipped between first-seen and the month before current', () => {

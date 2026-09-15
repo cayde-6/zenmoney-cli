@@ -11,6 +11,13 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
+// A limit map key of `__proto__`/`constructor`/`prototype` is rejected
+// outright rather than merely tolerated: `limits[key] = ...` on the plain
+// `{}` literal used for `result.limits` would treat `__proto__` as the
+// special own-prototype setter rather than an ordinary property, silently
+// mangling that one object's prototype instead of storing a real limit.
+const FORBIDDEN_LIMIT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
 function validateLimit(value: unknown, key: string, source: string): RawLimit {
   if (value === null) return null
   if (typeof value === 'number') {
@@ -63,8 +70,14 @@ export function parseBudgetFile(text: string, source: string): BudgetFile {
       result.limits = {}
     } else {
       if (!isPlainObject(raw.limits)) throw new ZmError('INVALID_ARGS', `${source}: "limits" must be an object`)
-      const limits: Record<string, RawLimit> = {}
+      // Object.create(null) rather than `{}`: even a key this loop failed to
+      // reject could otherwise silently mutate the object's prototype instead
+      // of becoming a property (see FORBIDDEN_LIMIT_KEYS above).
+      const limits: Record<string, RawLimit> = Object.create(null)
       for (const [key, value] of Object.entries(raw.limits)) {
+        if (FORBIDDEN_LIMIT_KEYS.has(key)) {
+          throw new ZmError('INVALID_ARGS', `${source}: limit key "${key}" is not allowed`)
+        }
         limits[key] = validateLimit(value, key, source)
       }
       result.limits = limits
@@ -101,9 +114,29 @@ export function mergeBudget(base: BudgetFile | null, month: BudgetFile | null): 
   return result
 }
 
+// For each key in the effective (merged) limit map, which file its current
+// value actually came from — the month file if it set (or overrode) that
+// key, otherwise the template. Used to name a source in the "unknown budget
+// category" warning (see budget/status.ts's unresolvedLimits).
+function keySources(base: BudgetFile | null, month: BudgetFile | null, defaultPath: string, monthPath: string): Map<string, string> {
+  const result = new Map<string, string>()
+  for (const [key, raw] of Object.entries(base?.limits ?? {})) {
+    if (raw === null) continue
+    result.set(key, defaultPath)
+  }
+  for (const [key, raw] of Object.entries(month?.limits ?? {})) {
+    if (raw === null) {
+      result.delete(key)
+      continue
+    }
+    result.set(key, monthPath)
+  }
+  return result
+}
+
 // Reads `<dir>/default.yaml` (template) and `<dir>/<month>.yaml` (override), if
 // they exist, and merges them. Fails if neither is present.
-export function loadBudget(dir: string, month: string): { limits: Map<string, LimitSpec>; sources: string[] } {
+export function loadBudget(dir: string, month: string): { limits: Map<string, LimitSpec>; sources: string[]; keySources: Map<string, string> } {
   const defaultPath = join(dir, 'default.yaml')
   const monthPath = join(dir, `${month}.yaml`)
   const sources: string[] = []
@@ -121,5 +154,5 @@ export function loadBudget(dir: string, month: string): { limits: Map<string, Li
   if (sources.length === 0) {
     throw new ZmError('INVALID_ARGS', `no budget files found in ${dir}`, 'run zm budget init')
   }
-  return { limits: mergeBudget(base, monthFile), sources }
+  return { limits: mergeBudget(base, monthFile), sources, keySources: keySources(base, monthFile, defaultPath, monthPath) }
 }

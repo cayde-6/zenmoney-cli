@@ -16,6 +16,6 @@ describe('util', () => {
     expect(addMonths('2026-11', 3)).toBe('2027-02')
   })
   it('suggests closest names', () => {
-    expect(suggest(['Продукты', 'Подарки', 'Здоровье'], 'продукт')[0]).toBe('Продукты')
+    expect(suggest(['Groceries', 'Gifts', 'Health'], 'grocer')[0]).toBe('Groceries')
   })
 })

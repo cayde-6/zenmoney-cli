@@ -9,10 +9,12 @@ export interface Tx {
   amount: number; currency: string // primary side, positive
   accountId: string; accountTitle: string; ownerId: number
   categoryId: string | null; topCategoryId: string | null
-  categoryPath: string // 'Еда/Кафе', 'Продукты', 'Без категории'
+  categoryPath: string // 'Food/Cafe', 'Groceries', 'Uncategorized'
   merchant: string | null // merchant title, else payee
   payee: string | null // raw payee text as entered, independent of a resolved merchant
   comment: string | null
+  hold: boolean // ZenMoney's own marker for a not-yet-settled/pending transaction; never affects classification/aggregation
+  originalPayee: string | null // payee text ZenMoney recorded before any user edit/merchant resolution, if present
   counterpart?: { accountId: string; accountTitle: string; amount: number; currency: string } // transfer/debt other side
 }
 
@@ -21,7 +23,7 @@ export interface Dataset {
   instruments: Map<number, ZmInstrument>; txs: Tx[]
 }
 
-export const NO_CATEGORY = 'Без категории'
+export const NO_CATEGORY = 'Uncategorized'
 
 export function classify(t: ZmTransaction, accounts: Map<string, ZmAccount>, tags: Map<string, ZmTag>): TxType {
   const incomeAccount = accounts.get(t.incomeAccount)
@@ -29,13 +31,13 @@ export function classify(t: ZmTransaction, accounts: Map<string, ZmAccount>, tag
   if (incomeAccount?.type === 'debt' || outcomeAccount?.type === 'debt') return 'debt'
   if (t.income > 0 && t.outcome > 0 && t.incomeAccount !== t.outcomeAccount) return 'transfer'
   if (t.outcome > 0) return 'expense'
-  if (t.income > 0) {
-    const firstTagId = t.tag?.[0] ?? null
-    const firstTag = firstTagId ? tags.get(firstTagId) : undefined
-    if (firstTag && firstTag.showOutcome && !firstTag.showIncome) return 'refund'
-    return 'income'
-  }
-  return 'expense'
+  // t.income > 0 here: loadDataset already excludes transactions where both
+  // income and outcome are 0 before ever calling classify, so this is the
+  // only remaining case — no unreachable trailing `return 'expense'` needed.
+  const firstTagId = t.tag?.[0] ?? null
+  const firstTag = firstTagId ? tags.get(firstTagId) : undefined
+  if (firstTag && firstTag.showOutcome && !firstTag.showIncome) return 'refund'
+  return 'income'
 }
 
 export function categoryPath(tagId: string | null, tags: Map<string, ZmTag>): string {
@@ -78,7 +80,10 @@ export function loadDataset(store: Store): Dataset {
     if (t.income === 0 && t.outcome === 0) continue // carries no money, never a real expense/income
     const type = classify(t, accounts, tags)
     const firstTagId = t.tag?.[0] ?? null
-    const catId = firstTagId ?? null
+    // A tag id that doesn't resolve to any known tag (deleted/never-synced)
+    // is treated exactly like no tag at all: categoryId/topCategoryId null,
+    // categoryPath the shared NO_CATEGORY constant.
+    const catId = firstTagId !== null && tags.has(firstTagId) ? firstTagId : null
     const catPath = categoryPath(catId, tags)
     const topCategoryId = topCategoryIdOf(catId, tags)
 
@@ -86,6 +91,8 @@ export function loadDataset(store: Store): Dataset {
     const merchantTitle = t.merchant ? merchants.get(t.merchant)?.title : undefined
     const merchant = merchantTitle ?? payee
     const comment = t.comment ? t.comment.trim() || null : null
+    const hold = t.hold ?? false
+    const originalPayee = t.originalPayee ? t.originalPayee.trim() || null : null
 
     let accountId: string, amount: number, instrumentId: number
     let counterpart: Tx['counterpart']
@@ -149,6 +156,8 @@ export function loadDataset(store: Store): Dataset {
       merchant,
       payee,
       comment,
+      hold,
+      originalPayee,
       ...(counterpart ? { counterpart } : {}),
     })
   }

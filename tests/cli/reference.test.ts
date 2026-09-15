@@ -1,4 +1,7 @@
 import { it, expect } from 'vitest'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { run } from '../../src/cli/program.js'
 import { seededContext, testContext } from '../helpers.js'
 import { Store } from '../../src/store/store.js'
@@ -44,8 +47,8 @@ it('accounts respects --owner', async () => {
 })
 it('categories flat and tree', async () => {
   const flat = (await zm(['categories'])).t.json().data
-  expect(flat).toContainEqual({ id: 'cafe', path: 'Еда/Кафе', parentId: 'eat', kind: 'expense' })
-  expect(flat).toContainEqual({ id: 'salary', path: 'Зарплата', parentId: null, kind: 'income' })
+  expect(flat).toContainEqual({ id: 'cafe', path: 'Food/Cafe', parentId: 'eat', kind: 'expense' })
+  expect(flat).toContainEqual({ id: 'salary', path: 'Salary', parentId: null, kind: 'income' })
   const tree = (await zm(['categories', '--tree'])).t.json().data
   expect(tree.find((c: any) => c.id === 'health').children.map((c: any) => c.id)).toEqual(['dent'])
 })
@@ -70,7 +73,7 @@ it('categories --tree table flattens children with a two-space indent, never fal
   // indent must add exactly 2 more, for exactly 6 total — anchored at line start
   // so padding can't be mistaken for the indent (a loose `\s+` match, which
   // backtracks to fit any number of spaces, would pass even without one).
-  expect(out).toMatch(/^dent {6}Здоровье\/Стоматология/m)
+  expect(out).toMatch(/^dent {6}Health\/Dentist/m)
 })
 it('tx table flattens counterpart into counterpartAccount/Amount/Currency columns', async () => {
   const { t } = await zm(['tx', '--month', '2026-09', '--type', 'transfer', '--format', 'table'])
@@ -109,9 +112,9 @@ it('tx --type rejects an empty list', async () => {
   expect(commaOnly.t.errJson().error.code).toBe('INVALID_ARGS')
 })
 it('tx with filters and limit', async () => {
-  const { t } = await zm(['tx', '--month', '2026-09', '--type', 'expense,refund', '--category', 'Продукты', '--limit', '2'])
+  const { t } = await zm(['tx', '--month', '2026-09', '--type', 'expense,refund', '--category', 'Groceries', '--limit', '2'])
   expect(t.json().data.map((x: any) => x.id)).toEqual(['t5', 't2'])
-  expect(t.json().meta).toMatchObject({ from: '2026-09-01', to: '2026-09-30', category: 'Продукты', total: 3, returned: 2 })
+  expect(t.json().meta).toMatchObject({ from: '2026-09-01', to: '2026-09-30', category: 'Groceries', total: 3, returned: 2 })
 })
 it('tx warns on an unknown --currency but still succeeds', async () => {
   const { code, t } = await zm(['tx', '--currency', 'ZZZ'])
@@ -142,4 +145,27 @@ it('bad category exits 2', async () => {
 it('no cache exits 5', async () => {
   const t = testContext()
   expect(await run(['node', 'zm', 'users'], t.ctx)).toBe(5)
+})
+// Review round item 10: A-4's corruption handling exercised through the
+// actual CLI command layer (ctx.openStore()), not just Store directly.
+it('a garbage cache file makes `zm users` exit 5 with a delete-and-resync hint', async () => {
+  const t = testContext()
+  mkdirSync(dirname(t.ctx.paths.cacheDb), { recursive: true })
+  writeFileSync(t.ctx.paths.cacheDb, 'not a sqlite file at all')
+  const code = await run(['node', 'zm', 'users'], t.ctx)
+  expect(code).toBe(5)
+  expect(t.errJson().error).toMatchObject({
+    code: 'NO_CACHE',
+    hint: `delete ${t.ctx.paths.cacheDb} and run zm sync --full`,
+  })
+})
+it('a row with invalid raw JSON makes `zm users` exit 5', async () => {
+  const t = seededContext()
+  const raw = new DatabaseSync(t.ctx.paths.cacheDb)
+  raw.exec('PRAGMA journal_mode=WAL')
+  raw.prepare(`UPDATE "user" SET raw = 'not json' WHERE id = '10'`).run()
+  raw.close()
+  const code = await run(['node', 'zm', 'users'], t.ctx)
+  expect(code).toBe(5)
+  expect(t.errJson().error).toMatchObject({ code: 'NO_CACHE' })
 })

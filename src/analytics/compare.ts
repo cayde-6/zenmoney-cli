@@ -1,21 +1,32 @@
 import type { Tx } from '../query/model.js'
 import { isSpendTx, spendSign } from '../query/model.js'
+import { MONTH_RE, resolvePeriod } from '../query/filters.js'
 import { ZmError } from '../errors.js'
-import { monthRange, round1, round2 } from '../util.js'
+import { compareNames, round1, round2 } from '../util.js'
 
-export interface CompareRow { key: string; currency: string; period: number; vs: number; diff: number; diffPct: number | null }
+// The index signature makes this directly usable as a `--format table` row
+// (Record<string, string | number | null>) with no cast needed.
+export interface CompareRow {
+  key: string; currency: string; period: number; vs: number; diff: number; diffPct: number | null
+  [field: string]: string | number | null
+}
 
-const MONTH_RE = /^\d{4}-\d{2}$/
 const RANGE_RE = /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/
 
+// Delegates to the shared resolvePeriod (query/filters.ts) so a range is
+// validated as real calendar dates with from <= to, not just matched against
+// the YYYY-MM-DD..YYYY-MM-DD shape — the same validation `tx`/`spend`/`income`
+// already get from their own --from/--to.
 export function parsePeriod(p: string): { from: string; to: string } {
   if (MONTH_RE.test(p)) {
-    const month = Number(p.slice(5, 7))
-    if (month < 1 || month > 12) throw new ZmError('INVALID_ARGS', `invalid month: ${p}`, 'use YYYY-MM')
-    return monthRange(p)
+    const { from, to } = resolvePeriod({ month: p })
+    return { from: from!, to: to! }
   }
   const range = RANGE_RE.exec(p)
-  if (range) return { from: range[1]!, to: range[2]! }
+  if (range) {
+    const { from, to } = resolvePeriod({ from: range[1], to: range[2] })
+    return { from: from!, to: to! }
+  }
   throw new ZmError('INVALID_ARGS', `invalid period: ${p}`, 'use YYYY-MM or YYYY-MM-DD..YYYY-MM-DD')
 }
 
@@ -51,5 +62,5 @@ export function compare(periodTxs: Tx[], vsTxs: Tx[], by: 'total' | 'category'):
     }
   }
 
-  return rows.sort((a, b) => a.key.localeCompare(b.key, 'ru') || (a.currency < b.currency ? -1 : a.currency > b.currency ? 1 : 0))
+  return rows.sort((a, b) => compareNames(a.key, b.key) || compareNames(a.currency, b.currency))
 }

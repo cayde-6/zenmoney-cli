@@ -15,17 +15,65 @@ function sanitizeNetworkMessage(message: string, token: string): string {
   return token ? message.split(token).join('***') : message
 }
 
-export async function fetchDiff(token: string, serverTimestamp: number, deps: { fetch: typeof fetch; now: () => Date }): Promise<ZmDiff> {
+const DEFAULT_TIMEOUT_MS = 60_000
+// setTimeout (which AbortSignal.timeout is built on) has an effectively
+// 32-bit signed delay ceiling; anything above this either silently
+// misbehaves or fires immediately depending on the runtime, so it's
+// rejected up front rather than passed through.
+const MAX_TIMEOUT_MS = 2_147_483_647
+// Plain decimal digits only: `Number(raw)` alone is too permissive (accepts
+// exponent notation like "1e3", hex like "0x10", and leading/trailing
+// whitespace like " 5 "), none of which are a sane way to spell a millisecond
+// count in an env var.
+const TIMEOUT_RE = /^\d+$/
+
+// `ZM_TIMEOUT_MS`: how long to wait for the ZenMoney API before giving up
+// (default 60000ms). Validated up front so a bad value fails the same way
+// regardless of which command triggers a network call.
+export function parseTimeoutMs(env: Record<string, string | undefined>): number {
+  const raw = env.ZM_TIMEOUT_MS
+  if (raw === undefined) return DEFAULT_TIMEOUT_MS
+  if (!TIMEOUT_RE.test(raw)) {
+    throw new ZmError('INVALID_ARGS', `invalid ZM_TIMEOUT_MS: ${raw}`, 'must be a positive integer (milliseconds)')
+  }
+  const n = Number(raw)
+  if (n < 1 || n > MAX_TIMEOUT_MS) {
+    throw new ZmError('INVALID_ARGS', `invalid ZM_TIMEOUT_MS: ${raw}`, `must be between 1 and ${MAX_TIMEOUT_MS}`)
+  }
+  return n
+}
+
+// A fetch-level failure's `cause.code` (undici sets this for connection-level
+// errors, e.g. ENOTFOUND, ECONNRESET, UND_ERR_CONNECT_TIMEOUT) is the most
+// useful diagnostic detail available and never contains the token, so it's
+// safe to append as-is after the (still scrubbed) message.
+function causeCode(e: unknown): string | undefined {
+  const cause = (e as { cause?: unknown } | null)?.cause
+  const code = (cause as { code?: unknown } | null)?.code
+  return typeof code === 'string' ? code : undefined
+}
+
+export async function fetchDiff(
+  token: string,
+  serverTimestamp: number,
+  deps: { fetch: typeof fetch; now: () => Date; timeoutMs?: number },
+): Promise<ZmDiff> {
   let res: Response
   try {
     res = await deps.fetch(DIFF_URL, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ currentClientTimestamp: Math.floor(deps.now().getTime() / 1000), serverTimestamp }),
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     })
   } catch (e) {
-    throw new ZmError('NETWORK', `cannot reach ZenMoney: ${sanitizeNetworkMessage((e as Error).message, token)}`, 'check your connection and retry')
+    const sanitized = sanitizeNetworkMessage((e as Error).message, token)
+    const code = causeCode(e)
+    throw new ZmError(
+      'NETWORK',
+      `cannot reach ZenMoney: ${sanitized}${code ? ` (${code})` : ''}`,
+      'check your connection and retry',
+    )
   }
   if (res.status === 401 || res.status === 403) throw new ZmError('AUTH', 'ZenMoney rejected the token', 'run zm auth')
   if (!res.ok) {

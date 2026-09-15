@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest'
-import { run, buildProgram } from '../../src/cli/program.js'
+import { run, buildProgram, staleWarnings } from '../../src/cli/program.js'
 import { testContext, seededContext } from '../helpers.js'
 
 it('prints version', async () => {
@@ -25,12 +25,19 @@ it('error format detection: --format=table is recognised', async () => {
   expect(code).toBe(2)
   expect(t.err.join('')).toMatch(/^error: /)
 })
+// A-20: singular/plural grammar ("1 day old" vs "N days old").
+it('staleWarnings uses singular "day" for exactly one day, plural otherwise', () => {
+  const ctx = testContext({ now: () => new Date('2026-09-16T12:00:00Z') }).ctx // 1 day 4h after lastSyncAt
+  expect(staleWarnings(ctx, '2026-09-15T08:00:00Z')).toEqual(['cache is 1 day old, run zm sync'])
+  const ctx3 = testContext({ now: () => new Date('2026-09-18T09:00:00Z') }).ctx // ~3 days after
+  expect(staleWarnings(ctx3, '2026-09-15T08:00:00Z')).toEqual(['cache is 3 days old, run zm sync'])
+})
 it('bare invocation with a subcommand registered exits non-zero and writes help to stderr', async () => {
-  // buildProgram(ctx) itself registers no subcommands in this task, so this scenario
-  // (bare `zm` triggering commander's own "show help, exit 1" behavior) can't be
-  // reproduced through the real program yet. Inject a program with one dummy
-  // subcommand via run()'s test-only `build` override to exercise the same
-  // exitCode-aware catch path that a future task's real subcommands will hit.
+  // The real buildProgram(ctx) would also reproduce this (a bare `zm` prints
+  // help and exits 2 once any subcommand is registered), but injecting a
+  // minimal one-command program via run()'s test-only `build` override keeps
+  // this test isolated from the real command list, so it only exercises
+  // run()'s own exitCode-aware catch path.
   const t = testContext()
   const code = await run(['node', 'zm'], t.ctx, ctx => {
     const program = buildProgram(ctx)

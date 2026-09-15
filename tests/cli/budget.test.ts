@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, statSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { run } from '../../src/cli/program.js'
 import { seededContext, testContext } from '../helpers.js'
@@ -10,9 +10,19 @@ it('init writes template, refuses overwrite, --force overwrites', async () => {
   expect(await run(['node', 'zm', 'budget', 'init'], t.ctx)).toBe(0)
   const text = readFileSync(join(t.ctx.paths.budgetDir, 'default.yaml'), 'utf8')
   expect(text).toMatch(/^currency: EUR/m)
-  expect(text).toMatch(/#\s+Здоровье\/Стоматология: 0/)
+  expect(text).toMatch(/#\s+Health\/Dentist: 0/)
   expect(await run(['node', 'zm', 'budget', 'init'], t.ctx)).toBe(2)
   expect(await run(['node', 'zm', 'budget', 'init', '--force'], t.ctx)).toBe(0)
+})
+// Review round item 9: budget init creates ~/.config/zm/budget (and thus
+// ~/.config/zm itself, via mkdir's `recursive: true`) on a fresh home —
+// the config dir itself must end up at 0700, not just the budget/ subdir.
+it('init on a fresh home creates the config dir itself at mode 700, not just budget/', async () => {
+  const t = seededContext()
+  expect(existsSync(t.ctx.paths.configDir)).toBe(false)
+  expect(await run(['node', 'zm', 'budget', 'init'], t.ctx)).toBe(0)
+  expect(statSync(t.ctx.paths.configDir).mode & 0o777).toBe(0o700)
+  expect(statSync(t.ctx.paths.budgetDir).mode & 0o777).toBe(0o700)
 })
 it('init template uncomments into valid yaml', async () => {
   const t = seededContext()
@@ -33,11 +43,34 @@ it('status right after a fresh init: comment-only limits, no plans yet', async (
 it('status uses owner filter and current month', async () => {
   const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
   mkdirSync(t.ctx.paths.budgetDir, { recursive: true })
-  writeFileSync(join(t.ctx.paths.budgetDir, 'default.yaml'), 'currency: PLN\nlimits:\n  Продукты: 10000\n')
+  writeFileSync(join(t.ctx.paths.budgetDir, 'default.yaml'), 'currency: PLN\nlimits:\n  Groceries: 10000\n')
   expect(await run(['node', 'zm', 'budget', 'status', '--owner', 'me'], t.ctx)).toBe(0)
   const d = t.json().data
   expect(d.month).toBe('2026-09')
-  expect(d.rows[0]).toMatchObject({ category: 'Продукты', spent: 2500, usedPct: 25 })
+  expect(d.rows[0]).toMatchObject({ category: 'Groceries', spent: 2500, usedPct: 25 })
+})
+it('status skips a limit key that no longer resolves, warning and listing it as unresolved', async () => {
+  const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
+  mkdirSync(t.ctx.paths.budgetDir, { recursive: true })
+  writeFileSync(
+    join(t.ctx.paths.budgetDir, 'default.yaml'),
+    'currency: PLN\nlimits:\n  Groceries: 10000\n  NoSuchCategoryAnymore: { amount: 500, currency: EUR }\n',
+  )
+  expect(await run(['node', 'zm', 'budget', 'status'], t.ctx)).toBe(0)
+  const body = t.json()
+  expect(body.data.rows.map((r: any) => r.category)).toEqual(['Groceries'])
+  expect(body.data.unresolved).toEqual([{ key: 'NoSuchCategoryAnymore', amount: 500, currency: 'EUR' }])
+  expect(body.warnings).toContain(
+    `unknown budget category "NoSuchCategoryAnymore" in ${join(t.ctx.paths.budgetDir, 'default.yaml')}, skipped`,
+  )
+})
+it('status still fails hard on a duplicate-key collision between two resolvable keys', async () => {
+  const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
+  mkdirSync(t.ctx.paths.budgetDir, { recursive: true })
+  writeFileSync(join(t.ctx.paths.budgetDir, 'default.yaml'), 'currency: PLN\nlimits:\n  Cafe: 100\n  Food/Cafe: 200\n')
+  const code = await run(['node', 'zm', 'budget', 'status'], t.ctx)
+  expect(code).toBe(2)
+  expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS' })
 })
 it('suggest prints raw yaml', async () => {
   // now is the last day of August, so August itself hasn't fully elapsed yet:
@@ -54,12 +87,19 @@ it('suggest window is capped by the current month, not just the target month', a
   expect(await run(['node', 'zm', 'budget', 'suggest', '--months', '3'], t.ctx)).toBe(0)
   expect(t.out.join('')).toMatch(/^# zm budget suggest: median of 2026-06\.\.2026-08, generated for 2026-10/)
 })
+it('suggest falls back to the main user currency when no pairs qualify', async () => {
+  const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
+  // A window with no fixture transactions at all: nothing qualifies.
+  expect(await run(['node', 'zm', 'budget', 'suggest', '--months', '1', '--month', '2020-02'], t.ctx)).toBe(0)
+  const { parse } = await import('yaml')
+  expect(parse(t.out.join(''))).toMatchObject({ currency: 'EUR', limits: {} })
+})
 it('status table includes an otherCurrencies column', async () => {
   const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
   mkdirSync(t.ctx.paths.budgetDir, { recursive: true })
-  writeFileSync(join(t.ctx.paths.budgetDir, 'default.yaml'), 'currency: PLN\nlimits:\n  Еда: 15\n')
+  writeFileSync(join(t.ctx.paths.budgetDir, 'default.yaml'), 'currency: PLN\nlimits:\n  Food: 15\n')
   expect(await run(['node', 'zm', 'budget', 'status', '--format', 'table'], t.ctx)).toBe(0)
-  expect(t.out.join('')).toMatch(/Еда\s+PLN\s+15\s+0\s+15\s+0\s+-50\s+EUR 20/)
+  expect(t.out.join('')).toMatch(/Food\s+PLN\s+15\s+0\s+15\s+0\s+-50\s+EUR 20/)
 })
 it('status rejects an invalid --month before touching the store', async () => {
   const t = testContext() // no cache at all

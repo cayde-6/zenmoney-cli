@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      # Before installing anything: a tag that doesn't match package.json's
+      # version is always a mistake (forgot to bump, or bumped and forgot to
+      # tag) — fail immediately rather than after a full verify + build.
+      - name: Check tag matches package.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag v$tag does not match package.json version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify
+        run: npm run verify
+
+      - name: Pack tarball
+        run: |
+          mkdir -p release
+          npm pack --pack-destination release
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-tarball
+          path: release/*.tgz
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    # Only this job needs write access: publishing to npm (Trusted
+    # Publishing via OIDC) and creating the GitHub release.
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: Download tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: release-tarball
+          path: release
+
+      # The first release of any given version is published manually once
+      # (see docs/versioning.md's one-time setup — this is how v0.1.0 itself
+      # is handled), so this workflow must never assume `npm publish` is
+      # safe to run unconditionally: it would fail (npm refuses to
+      # republish an existing version) and there's no YAML-level way to
+      # express "run this shell step and branch on its result", hence the
+      # small script instead of an inline check.
+      - name: Check whether this version is already published
+        id: published
+        # npm-published.mjs's exit codes are load-bearing: 0 = already
+        # published (skip `npm publish`), 1 = not published (run `npm
+        # publish`), anything else = the check itself failed in some
+        # unexpected way — fail this job closed rather than guess, since a
+        # plain `if node ...; then` can only ever distinguish zero from
+        # non-zero and would otherwise treat a usage/internal error (2, 3,
+        # ...) the same as "not published" and proceed to publish anyway.
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          set +e
+          node .github/scripts/npm-published.mjs "$name" "$version"
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "already=true" >> "$GITHUB_OUTPUT" ;;
+            1) echo "already=false" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "npm-published.mjs exited with unexpected code $code — failing closed" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Publish to npm
+        if: steps.published.outputs.already == 'false'
+        # A bare `release/*.tgz` is ambiguous to npm's package-arg parser
+        # (it can be read as GitHub shorthand `owner/repo`) — the leading
+        # `./` is required for it to be treated as a local tarball path.
+        run: npm publish --access public --provenance ./release/*.tgz
+
+      - name: Skip publish (already on npm)
+        if: steps.published.outputs.already == 'true'
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          echo "::notice::$name@$version is already published on npm — skipping npm publish"
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            release/*.tgz \
+            --generate-notes \
+            --verify-tag

@@ -1,6 +1,10 @@
 # zenmoney-cli
 
+[![Release](https://github.com/cayde-6/zenmoney-cli/actions/workflows/release.yml/badge.svg)](https://github.com/cayde-6/zenmoney-cli/actions/workflows/release.yml)
+[![npm version](https://img.shields.io/npm/v/@cayde-6/zenmoney-cli)](https://www.npmjs.com/package/@cayde-6/zenmoney-cli)
+[![npm downloads](https://img.shields.io/npm/dm/@cayde-6/zenmoney-cli)](https://www.npmjs.com/package/@cayde-6/zenmoney-cli)
 [![CI](https://github.com/cayde-6/zenmoney-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/cayde-6/zenmoney-cli/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/cayde-6/zenmoney-cli/branch/main/graph/badge.svg)](https://codecov.io/gh/cayde-6/zenmoney-cli)
 
 A read-only command-line client for [ZenMoney](https://zenmoney.ru/): `zm`
 reads your transactions, accounts and categories and reports spend, income,
@@ -40,11 +44,20 @@ plus a local, file-based monthly budget checked against your actual spend.
 
 ## Install
 
+### From npm
+
 ```
-npm i -g zenmoney-cli   # once published
+npm i -g @cayde-6/zenmoney-cli   # once published
+zm --help
 ```
 
-From source:
+Or run it without installing anything:
+
+```
+npx @cayde-6/zenmoney-cli --help
+```
+
+### From source
 
 ```
 git clone https://github.com/cayde-6/zenmoney-cli.git
@@ -76,11 +89,26 @@ via the process list (`ps`).
 
 The token can also be supplied without running `zm auth` at all, via the
 `ZENMONEY_TOKEN` environment variable — useful in CI or for one-off scripts.
-Remove a stored token with `zm auth --logout`.
+Remove a stored token with `zm auth --logout` (this warns if `ZENMONEY_TOKEN`
+is still set in the environment, since it takes precedence and will still be
+used even after logout).
+
+`zm status` reports cache/token/config state — cache path, whether it
+exists, whether it's readable (plus an `error` message when it isn't),
+`lastSyncAt`/`ageHours`, where a token would be found (`env` | `keychain` |
+`config` | `null` — never the token value itself), `configDir`, `budgetDir`,
+and the installed version. It makes no network call, works with no token
+and no cache at all, and never modifies the database's own contents: it
+prefers a mode that touches no files at all, only falling back to a plain
+read-only open when there's real unsynced data it would otherwise miss —
+that fallback may, in this rare case, leave `-wal`/`-shm` sidecar files
+next to the cache (they're never deleted, to avoid corrupting another
+process, e.g. a concurrent `zm sync`, that starts relying on them). So it's
+always safe to run first when something else isn't working.
 
 A few example commands, with real output shape (from a small neutral
 account: two users `owner`/`partner`, currencies PLN/EUR, categories like
-Продукты/Кафе/Подписки, merchants like FreshMart/Netflix):
+Groceries/Cafe/Subscriptions, merchants like FreshMart/Netflix):
 
 **Spend by category for a month** (a few of the returned groups shown):
 
@@ -91,9 +119,9 @@ $ zm spend --by category --month 2026-09
 ```json
 {
   "data": [
-    { "key": "Еда/Кафе", "amounts": [{ "currency": "EUR", "amount": 20, "count": 1 }] },
-    { "key": "Подписки", "amounts": [{ "currency": "EUR", "amount": 12, "count": 1 }] },
-    { "key": "Продукты", "amounts": [{ "currency": "PLN", "amount": 4500, "count": 3 }] }
+    { "key": "Food/Cafe", "amounts": [{ "currency": "EUR", "amount": 20, "count": 1 }] },
+    { "key": "Groceries", "amounts": [{ "currency": "PLN", "amount": 4500, "count": 3 }] },
+    { "key": "Subscriptions", "amounts": [{ "currency": "EUR", "amount": 12, "count": 1 }] }
   ],
   "meta": { "by": "category", "from": "2026-09-01", "to": "2026-09-30", "category": null, "owner": "all", "account": null, "currency": null, "lastSyncAt": "2026-09-20T12:00:00.000Z" }
 }
@@ -101,14 +129,16 @@ $ zm spend --by category --month 2026-09
 
 **Transactions as a table** (a few columns shown; `tx` also returns `accountId`,
 `ownerId`, `categoryId`, `topCategoryId`, `categoryPath`, `payee`, `comment`,
-and, for transfers/debts, `counterpartAccount`/`counterpartAmount`/`counterpartCurrency`
-flattened columns — in JSON these are a nested `counterpart: { accountId,
-accountTitle, amount, currency }` object instead). `tx` returns at most 100
-rows by default (`--limit` to change it); `meta.total` and `meta.returned`
-tell you whether the list was cut off:
+`hold` (boolean — a not-yet-settled ZenMoney transaction, counted normally),
+`originalPayee`, and, for transfers/debts, `counterpartAccount`/
+`counterpartAmount`/`counterpartCurrency` flattened columns — in JSON these
+are a nested `counterpart: { accountId, accountTitle, amount, currency }`
+object instead). `tx` returns at most 100 rows by default (`--limit` to
+change it); `meta.total` and `meta.returned` tell you whether the list was
+cut off:
 
 ```
-$ zm tx --category Продукты --limit 3 --format table
+$ zm tx --category Groceries --limit 3 --format table
 id  date        type     amount  currency  accountTitle  merchant
 t5  2026-09-10  refund   500     PLN       Card PLN      FreshMart
 t2  2026-09-05  expense  2000    PLN       Card Partner  CornerShop
@@ -124,8 +154,8 @@ $ zm compare --period 2026-09 --vs 2026-08 --by category
 ```json
 {
   "data": [
-    { "key": "Подписки", "currency": "EUR", "period": 12, "vs": 12, "diff": 0, "diffPct": 0 },
-    { "key": "Продукты", "currency": "PLN", "period": 4500, "vs": 45000, "diff": -40500, "diffPct": -90 }
+    { "key": "Groceries", "currency": "PLN", "period": 4500, "vs": 45000, "diff": -40500, "diffPct": -90 },
+    { "key": "Subscriptions", "currency": "EUR", "period": 12, "vs": 12, "diff": 0, "diffPct": 0 }
   ],
   "meta": { "by": "category", "period": "2026-09", "vs": "2026-08", "category": null, "account": null, "currency": null, "owner": "all", "lastSyncAt": "2026-09-20T12:00:00.000Z" }
 }
@@ -140,7 +170,7 @@ $ zm recurring --months 6
 ```json
 {
   "data": [
-    { "merchant": "Netflix", "categoryPath": "Подписки", "currency": "EUR", "monthsSeen": 4, "windowMonths": 6, "avgAmount": 12, "lastAmount": 12, "lastDate": "2026-09-15", "periodicity": "monthly" }
+    { "merchant": "Netflix", "categoryPath": "Subscriptions", "currency": "EUR", "monthsSeen": 4, "windowMonths": 6, "avgAmount": 12, "lastAmount": 12, "lastDate": "2026-09-15", "periodicity": "monthly" }
   ],
   "meta": { "months": 6, "minMonths": 3, "from": "2026-04", "to": "2026-09", "category": null, "account": null, "currency": null, "owner": "all", "lastSyncAt": "2026-09-20T12:00:00.000Z" }
 }
@@ -159,8 +189,8 @@ $ zm budget status --month 2026-09
     "month": "2026-09",
     "monthElapsedPct": 50,
     "rows": [
-      { "category": "Еда/Кафе", "categoryId": "cafe", "currency": "EUR", "planned": 50, "spent": 20, "spentOtherCurrencies": [], "remaining": 30, "usedPct": 40, "monthElapsedPct": 50, "pace": -10 },
-      { "category": "Подписки", "categoryId": "subs", "currency": "EUR", "planned": 15, "spent": 12, "spentOtherCurrencies": [], "remaining": 3, "usedPct": 80, "monthElapsedPct": 50, "pace": 30 }
+      { "category": "Food/Cafe", "categoryId": "cafe", "currency": "EUR", "planned": 50, "spent": 20, "spentOtherCurrencies": [], "remaining": 30, "usedPct": 40, "monthElapsedPct": 50, "pace": -10 },
+      { "category": "Subscriptions", "categoryId": "subs", "currency": "EUR", "planned": 15, "spent": 12, "spentOtherCurrencies": [], "remaining": 3, "usedPct": 80, "monthElapsedPct": 50, "pace": 30 }
     ]
   }
 }
@@ -171,6 +201,7 @@ $ zm budget status --month 2026-09
 ```
 zm auth [--token <token>] [--logout]
 zm sync [--full]
+zm status
 zm users
 zm accounts [--archived]
 zm categories [--tree]
@@ -193,8 +224,10 @@ always in sync with the installed version.
 
 All commands accept global `--format json|table` (default `json`) and
 `--owner me|all|<id>|<login>` (default `all`) — though `categories` and
-`rates` reject `--owner` outright (see below) rather than accepting and
-ignoring it.
+`rates` reject any `--owner` value other than `all` (see below) rather
+than accepting and ignoring it. `me` is the main user of the family
+account (the ZenMoney user with no parent) — not necessarily whoever's API
+token the CLI is using; run `zm users` to see who's who.
 
 Beyond that, flags are command-specific, not uniform across "filtering
 commands":
@@ -209,11 +242,13 @@ commands":
   always relative to now — it has no period flags at all.
 - `budget status`/`budget suggest` take a single `--month` (a target
   month, not a range) and no `--category`/`--account`/`--currency`.
-- `categories` and `rates` reject `--owner` with exit code 2 (neither has a
-  per-owner concept), rather than silently ignoring it. Elsewhere, `--owner`
-  only has an effect on `users`, `accounts`, `tx`, `spend`, `income`,
-  `compare`, `recurring`, `budget status`, and `budget suggest` — `auth` and
-  `sync` accept the flag but ignore it.
+- `categories` and `rates` reject any `--owner` value other than `all` with
+  exit code 2 (neither has a per-owner concept), rather than silently
+  ignoring it — `--owner all` (the default) is accepted since it's a no-op.
+  Elsewhere, `--owner` only has an effect on `users`, `accounts`, `tx`,
+  `spend`, `income`, `compare`, `recurring`, `budget status`, and `budget
+  suggest` — `auth`, `sync`, `status`, and `budget init` accept the flag but
+  it has no effect on any of them.
 
 ## Budget files
 
@@ -224,17 +259,17 @@ optional `YYYY-MM.yaml` files for month-specific overrides.
 # default.yaml
 currency: PLN
 limits:
-  Продукты: 2000
-  Кафе: 800
-  Подписки: { amount: 40, currency: EUR }
-  Хобби: 300
+  Groceries: 2000
+  Cafe: 800
+  Subscriptions: { amount: 40, currency: EUR }
+  Hobbies: 300
 ```
 
 ```yaml
 # 2026-10.yaml — only differences from the template
 limits:
-  Путешествия: { amount: 300, currency: EUR }
-  Хобби: null
+  Travel: { amount: 300, currency: EUR }
+  Hobbies: null
 ```
 
 A limit is either a plain number or an explicit `{ amount, currency }`. A
@@ -247,7 +282,7 @@ overrides the template key by key: `null` removes a limit. A key is a
 category path; a parent's limit covers its subcategories, but if a
 subcategory has its own limit, that subcategory's spend counts only against
 its own row, not the parent's. Two keys that resolve to the same category
-(e.g. `Кафе` and `Еда/Кафе`, if both name the same category) are a hard
+(e.g. `Cafe` and `Food/Cafe`, if both name the same category) are a hard
 error — write the same key spelling in both files.
 
 Workflow:
@@ -260,7 +295,10 @@ Workflow:
    month: `planned`, `spent`, `remaining`, `usedPct`, `monthElapsedPct`,
    and `pace` (`usedPct - monthElapsedPct`; positive means spending faster
    than the month is progressing) per category, plus an `unplanned` block
-   for spend in categories with no limit.
+   for spend in categories with no limit. A limit key that no longer
+   resolves to any category (e.g. renamed or deleted in ZenMoney) is
+   skipped with a warning instead of failing the command, and listed under
+   `unresolved: [{ key, amount, currency }]`.
 4. `zm budget suggest` prints a draft budget (based on median monthly
    spend over full months before the target month) to stdout — it never
    writes a file. Review it, then save it as a month override or fold it
@@ -282,7 +320,8 @@ is 3 days old, run zm sync"` is added — the data is still returned.
 | 2 | invalid arguments, invalid/unknown budget yaml, or a missing budget file |
 | 3 | no token, ZenMoney rejected the token (401/403), or the token could not be stored |
 | 4 | network or ZenMoney API error |
-| 5 | no local cache (run `zm sync`) |
+| 5 | no local cache (run `zm sync`), or the cache file is unreadable/corrupted (delete it and run `zm sync --full`) |
+| 6 | cache is busy (another `zm sync` is running) — retry in a few seconds |
 
 Errors are printed to stderr as `{"error": {"code", "message", "hint"}}`
 (plain text with `--format table`).
@@ -291,22 +330,34 @@ Errors are printed to stderr as `{"error": {"code", "message", "hint"}}`
 
 - All data stays on your machine. Config and budget files live in
   `~/.config/zm/` (`config.json`, `budget/*.yaml`), honoring
-  `XDG_CONFIG_HOME` if set (`%APPDATA%\zm` on Windows). The local cache (a
-  SQLite file, built from `zm sync`) lives in `~/.cache/zm/zm.sqlite`,
-  honoring `XDG_CACHE_HOME` if set (`%LOCALAPPDATA%\zm` on Windows).
+  `XDG_CONFIG_HOME` if set to an absolute path (`%APPDATA%\zm` on Windows).
+  The local cache (a SQLite file, built from `zm sync`) lives in
+  `~/.cache/zm/zm.sqlite`, honoring `XDG_CACHE_HOME` if set to an absolute
+  path (`%LOCALAPPDATA%\zm` on Windows). A relative `XDG_CONFIG_HOME`/
+  `XDG_CACHE_HOME` is invalid per the XDG spec and is ignored, falling back
+  to the default.
 - The only network calls this CLI makes are to `api.zenmoney.ru`, and only
   from `zm auth` (to validate a token) and `zm sync` (to download changes).
 - On macOS, `zm auth` prefers storing the token in the Keychain (service
-  `zenmoney-cli`) over `config.json`; `config.json` is written with mode
-  `600` when the Keychain isn't used. A stored token is only looked up by
-  commands that call the ZenMoney API — in practice just `zm sync` (`zm
-  auth` validates whatever token you just gave it, before saving it, rather
-  than looking up a previously stored one). Every read command works purely
-  off the local cache and never touches the token at all. The lookup order,
-  when it happens, is: `ZENMONEY_TOKEN` env var, then macOS Keychain, then
-  `config.json`. Set `ZM_DISABLE_KEYCHAIN=1` to skip the Keychain entirely
-  (e.g. in sandboxes without `security` access) and fall back to
-  `config.json`.
+  `zenmoney-cli`) over `config.json`; `config.json` is written atomically
+  (a temp file at mode `600`, renamed into place) when the Keychain isn't
+  used, and the config/cache/budget directories are created at mode `700`.
+  The local cache database is chmodded to `600` after every open, and opens
+  with `PRAGMA journal_mode=WAL`/`busy_timeout=5000` so concurrent `zm`
+  invocations don't corrupt it (a still-locked cache surfaces as exit code
+  6 rather than hanging). A stored token is only looked up by `zm sync`
+  (to call the API) and `zm status` (to report where a token would come
+  from — `zm status` never reads or prints the token's actual value, only
+  its `source`); `zm auth` validates whatever token you just gave it,
+  before saving it, rather than looking up a previously stored one. Every
+  other read command works purely off the local cache and never touches
+  the token at all. The lookup order, when it happens, is: `ZENMONEY_TOKEN`
+  env var, then macOS Keychain, then `config.json`. Set
+  `ZM_DISABLE_KEYCHAIN=1` to skip the Keychain entirely (e.g. in sandboxes
+  without `security` access) and fall back to `config.json`.
+- Network requests to `api.zenmoney.ru` (`zm auth`, `zm sync`) time out
+  after `ZM_TIMEOUT_MS` milliseconds (default `60000`); it must be a
+  positive integer, or the command fails fast with `INVALID_ARGS`.
 
 ## Using with AI agents
 
@@ -318,6 +369,29 @@ agents (also linked from `zm --help`).
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup, scripts, and
 conventions, and [`docs/architecture.md`](docs/architecture.md) for how the
 CLI is built and why.
+
+## Releases
+
+Publishing is a manual version bump + git tag push, verified and published
+by CI with npm provenance — no token stored in this repository. See
+[`docs/versioning.md`](docs/versioning.md) for the semver rules and
+one-time publishing setup, and
+[`docs/release-checklist.md`](docs/release-checklist.md) for the exact
+steps to cut a release.
+
+## Repo docs
+
+- [`SKILL.md`](SKILL.md) — command reference and recipes for LLM agents.
+- [`docs/architecture.md`](docs/architecture.md) — data flow, classification,
+  and design decisions.
+- [`docs/versioning.md`](docs/versioning.md) — semver rules and one-time
+  publishing setup.
+- [`docs/release-checklist.md`](docs/release-checklist.md) — steps to cut a
+  release.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, scripts, and conventions.
+- [`SECURITY.md`](SECURITY.md) — supported versions and how to report a
+  vulnerability.
+- [`CHANGELOG.md`](CHANGELOG.md) — notable changes, by version.
 
 ## License
 

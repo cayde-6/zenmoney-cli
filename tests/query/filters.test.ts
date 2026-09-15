@@ -1,6 +1,6 @@
 import { it, expect } from 'vitest'
 import { loadDataset, type Dataset } from '../../src/query/model.js'
-import { applyFilters, resolveAccount, resolveCategory, resolveOwner, resolvePeriod } from '../../src/query/filters.js'
+import { applyFilters, resolveAccount, resolveCategory, resolveFilterRefs, resolveOwner, resolvePeriod, usedCurrencies } from '../../src/query/filters.js'
 import type { ZmAccount } from '../../src/api/types.js'
 import { fixtureStore } from '../helpers.js'
 
@@ -32,24 +32,36 @@ it('period rejects from after to', () => {
   expect(() => resolvePeriod({ from: '2026-09-12', to: '2026-09-10' })).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
 })
 it('category includes children and matches by leaf title', () => {
-  expect(ids({ month: '2026-09', category: 'здоровье' })).toEqual(['t19', 't4'])
-  expect(resolveCategory(ds, 'Стоматология').path).toBe('Здоровье/Стоматология')
-  expect(resolveCategory(ds, 'Еда/Кафе').id).toBe('cafe')
+  expect(ids({ month: '2026-09', category: 'health' })).toEqual(['t19', 't4'])
+  expect(resolveCategory(ds, 'Dentist').path).toBe('Health/Dentist')
+  expect(resolveCategory(ds, 'Food/Cafe').id).toBe('cafe')
 })
 it('resolveCategory: duplicate full-path match is ambiguous', () => {
   const dupTags = new Map(ds.tags)
-  dupTags.set('food2', { id: 'food2', user: 10, title: 'Продукты', parent: null, showIncome: false, showOutcome: true, changed: 0 })
+  dupTags.set('food2', { id: 'food2', user: 10, title: 'Groceries', parent: null, showIncome: false, showOutcome: true, changed: 0 })
   const dupDs: Dataset = { users: ds.users, accounts: ds.accounts, tags: dupTags, instruments: ds.instruments, txs: [] }
-  try { resolveCategory(dupDs, 'Продукты'); throw new Error('no throw') }
+  try { resolveCategory(dupDs, 'Groceries'); throw new Error('no throw') }
   catch (e: any) {
     expect(e.code).toBe('INVALID_ARGS')
-    expect(e.hint).toMatch(/Продукты \(food\)/)
-    expect(e.hint).toMatch(/Продукты \(food2\)/)
+    expect(e.hint).toMatch(/Groceries \(food\)/)
+    expect(e.hint).toMatch(/Groceries \(food2\)/)
   }
 })
 it('unknown category suggests', () => {
-  try { resolveCategory(ds, 'Продукт'); throw new Error('no throw') }
-  catch (e: any) { expect(e.code).toBe('INVALID_ARGS'); expect(e.hint).toMatch(/Продукты/) }
+  try { resolveCategory(ds, 'Grocerie'); throw new Error('no throw') }
+  catch (e: any) { expect(e.code).toBe('INVALID_ARGS'); expect(e.hint).toMatch(/Groceries/) }
+})
+// A-17: a category title that itself contains "/" (e.g. "Phone/Internet")
+// must resolve both by its full path and by its bare (unsplit) leaf title —
+// splitting the joined path on "/" to find "the leaf" would instead extract
+// "Internet" and fail to match the query at all.
+it('resolves a category whose own title contains "/", both by full path and by its unsplit leaf title', () => {
+  const tags = new Map(ds.tags)
+  tags.set('services', { id: 'services', user: 10, title: 'Services', parent: null, showIncome: false, showOutcome: true, changed: 0 })
+  tags.set('phone-internet', { id: 'phone-internet', user: 10, title: 'Phone/Internet', parent: 'services', showIncome: false, showOutcome: true, changed: 0 })
+  const withServices: Dataset = { ...ds, tags }
+  expect(resolveCategory(withServices, 'Services/Phone/Internet').id).toBe('phone-internet')
+  expect(resolveCategory(withServices, 'Phone/Internet').id).toBe('phone-internet')
 })
 it('owner', () => {
   expect(resolveOwner(ds, 'all')).toBeNull()
@@ -87,6 +99,29 @@ it('resolveAccount: ambiguous hint lists title (id) pairs', () => {
     expect(e.hint).toMatch(/Blue Wallet \(a1\)/)
     expect(e.hint).toMatch(/Green Wallet \(a2\)/)
   }
+})
+// A-21: resolving category/account once per command, not once for meta and
+// again inside applyFilters.
+it('applyFilters uses pre-resolved refs instead of re-resolving from filters.category/account', () => {
+  const refs = { categoryPath: 'Groceries', categoryIds: new Set(['food']), accountId: 'acc-pln' }
+  // `category`/`account` here would themselves fail to resolve (ambiguous
+  // leaf title collision) if applyFilters actually re-resolved them —
+  // passing `refs` must make it skip that entirely and just use them.
+  const result = applyFilters(ds, { category: 'this is not a real category at all', account: 'nope', month: '2026-09' }, refs)
+  expect(result.every(t => t.categoryId === 'food')).toBe(true)
+})
+it('resolveFilterRefs resolves category/account once, reusable across multiple applyFilters calls', () => {
+  const refs = resolveFilterRefs(ds, { category: 'Groceries', account: 'Card PLN' })
+  expect(refs.categoryPath).toBe('Groceries')
+  expect(refs.accountId).toBe('acc-pln')
+  expect([...refs.categoryIds!]).toEqual(['food'])
+})
+// A-21: one shared used-currency helper, reused by currencyWarnings and by
+// `zm rates` (see tests/cli/reference.test.ts for the `rates` behavior).
+it('usedCurrencies includes every account currency plus both sides of every transaction', () => {
+  const used = usedCurrencies(ds)
+  expect(used.has('PLN')).toBe(true)
+  expect(used.has('EUR')).toBe(true)
 })
 it('resolveAccount: no-match hint lists title (id) pairs', () => {
   const small = accountDataset([account('a1', 'Blue Wallet')])

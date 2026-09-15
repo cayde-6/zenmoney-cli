@@ -8,9 +8,9 @@ import { testContext, fixtureStore } from '../helpers.js'
 import { Store } from '../../src/store/store.js'
 import { fixtureDiff } from '../fixtures/diff.js'
 
-// withStore has no consumer yet in this task (the first read command arrives in
-// Task 4), so it's exercised directly against a minimal fake Command that only
-// needs to answer optsWithGlobals() for formatOf().
+// Exercised directly against a minimal fake Command that only needs to
+// answer optsWithGlobals() for formatOf(), rather than through a real
+// registered command.
 function fakeCmd(): Command {
   return { optsWithGlobals: () => ({ format: 'json' }) } as unknown as Command
 }

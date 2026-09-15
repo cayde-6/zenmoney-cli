@@ -11,12 +11,19 @@ itself — its source, tests, and docs). For guidance on **using** the built
 |---|---|
 | `npm run build` | bundle `src/` into `dist/` with tsup |
 | `npm test` | run the vitest suite once |
-| `npm run typecheck` | `tsc --noEmit` |
-| `npm run check` | typecheck, then test, then build — run this before considering a change done |
+| `npm run test:coverage` | run the vitest suite with coverage thresholds enforced |
+| `npm run check` | `tsc --noEmit` |
+| `npm run verify` | check, then build, then test:coverage — run this before considering a change done |
 
-Running the CLI needs Node.js >= 22.13 (`node:sqlite` without a flag).
-Development uses Node.js 22.20+ or 24.x, same as CI (a build-tool
-optional dependency declares that engine range).
+Running the CLI needs Node.js >= 22.13 (`node:sqlite` without a flag). CI
+tests 22.13.0, 22, and 24 (`.github/workflows/ci.yml`); development works
+fine on any of them.
+
+Coverage thresholds (`vitest.config.ts`) are lines/statements/functions
+95%, branches 90%, over `src/**` (`src/bin.ts` excluded — see the comment
+in `vitest.config.ts`). Releasing is manual: see
+[`docs/release-checklist.md`](docs/release-checklist.md) and
+[`docs/versioning.md`](docs/versioning.md).
 
 ## Layout
 

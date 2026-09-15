@@ -7,7 +7,7 @@ const zm = async (args: string[]) => { const t = seededContext(); const code = a
 it('spend --by category --month', async () => {
   const { code, t } = await zm(['spend', '--by', 'category', '--month', '2026-09', '--owner', 'me'])
   expect(code).toBe(0)
-  const food = t.json().data.find((g: any) => g.key === 'Продукты')
+  const food = t.json().data.find((g: any) => g.key === 'Groceries')
   expect(food.amounts).toEqual([{ currency: 'PLN', amount: 2500, count: 2 }])
   expect(t.json().meta).toMatchObject({ by: 'category', from: '2026-09-01', to: '2026-09-30', owner: 'me' })
 })
@@ -17,19 +17,19 @@ it('spend --tree only with category', async () => {
 })
 it('spend table format flattens groups', async () => {
   const { t } = await zm(['spend', '--by', 'category', '--month', '2026-09', '--format', 'table'])
-  expect(t.out.join('')).toMatch(/Продукты\s+PLN\s+4500\s+3/)
+  expect(t.out.join('')).toMatch(/Groceries\s+PLN\s+4500\s+3/)
 })
 it('income --by month', async () => {
   const { t } = await zm(['income', '--by', 'month'])
   expect(t.json().data).toEqual([{ key: '2026-09', amounts: [{ currency: 'EUR', amount: 4200, count: 1 }] }])
 })
 it('compare', async () => {
-  const { t } = await zm(['compare', '--period', '2026-09', '--vs', '2026-08', '--by', 'category', '--category', 'Еда'])
-  expect(t.json().data).toEqual([{ key: 'Еда/Кафе', currency: 'EUR', period: 20, vs: 30, diff: -10, diffPct: -33.3 }])
+  const { t } = await zm(['compare', '--period', '2026-09', '--vs', '2026-08', '--by', 'category', '--category', 'Food'])
+  expect(t.json().data).toEqual([{ key: 'Food/Cafe', currency: 'EUR', period: 20, vs: 30, diff: -10, diffPct: -33.3 }])
 })
 it('compare meta lists every applied filter', async () => {
-  const { t } = await zm(['compare', '--period', '2026-09', '--vs', '2026-08', '--category', 'Еда', '--account', 'Cash EUR', '--currency', 'EUR', '--owner', 'me'])
-  expect(t.json().meta).toMatchObject({ category: 'Еда', account: 'acc-eur', currency: 'EUR', owner: 'me' })
+  const { t } = await zm(['compare', '--period', '2026-09', '--vs', '2026-08', '--category', 'Food', '--account', 'Cash EUR', '--currency', 'EUR', '--owner', 'me'])
+  expect(t.json().meta).toMatchObject({ category: 'Food', account: 'acc-eur', currency: 'EUR', owner: 'me' })
 })
 it('compare meta reports null for filters not given', async () => {
   const { t } = await zm(['compare', '--period', '2026-09', '--vs', '2026-08'])
@@ -52,8 +52,8 @@ it('compare warns on an unknown --currency but still succeeds', async () => {
 })
 it('recurring meta lists every applied filter', async () => {
   const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
-  expect(await run(['node', 'zm', 'recurring', '--category', 'Подписки', '--account', 'Cash EUR', '--currency', 'EUR', '--owner', 'me'], t.ctx)).toBe(0)
-  expect(t.json().meta).toMatchObject({ category: 'Подписки', account: 'acc-eur', currency: 'EUR', owner: 'me' })
+  expect(await run(['node', 'zm', 'recurring', '--category', 'Subscriptions', '--account', 'Cash EUR', '--currency', 'EUR', '--owner', 'me'], t.ctx)).toBe(0)
+  expect(t.json().meta).toMatchObject({ category: 'Subscriptions', account: 'acc-eur', currency: 'EUR', owner: 'me' })
 })
 it('recurring meta reports null for filters not given', async () => {
   const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
@@ -79,6 +79,11 @@ it('option-shape validation happens before the cache check: no cache, bad args s
   expect(await run(['node', 'zm', 'recurring', '--months', '0'], noCache.ctx)).toBe(2)
   expect(await run(['node', 'zm', 'tx', '--month', '2026-13'], noCache.ctx)).toBe(2)
   expect(await run(['node', 'zm', 'income', '--by', 'nope'], noCache.ctx)).toBe(2)
+})
+it('compare validates --period/--vs as real calendar ranges (from <= to) before the cache check', async () => {
+  const noCache = testContext()
+  expect(await run(['node', 'zm', 'compare', '--period', '2026-02-30..2026-03-01', '--vs', '2026-08'], noCache.ctx)).toBe(2)
+  expect(await run(['node', 'zm', 'compare', '--period', '2026-09-10..2026-09-01', '--vs', '2026-08'], noCache.ctx)).toBe(2)
 })
 it('an empty --currency is rejected before the cache check, for every command that accepts it', async () => {
   const noCache = testContext()

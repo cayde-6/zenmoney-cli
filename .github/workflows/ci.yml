@@ -8,16 +8,67 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  verify:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node-version: ['22.x', '24.x']
+        node: ['22.13.0', '22', '24']
+
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
-      - run: npm run check
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify
+        run: npm run verify
+
+      - name: Upload coverage to Codecov
+        if: matrix.node == '24'
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          fail_ci_if_error: false
+
+  smoke:
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pack tarball
+        # `mkdir -p` isn't valid in PowerShell (the default shell on the
+        # windows-latest runner in this matrix), so create the directory via
+        # node instead of a shell builtin.
+        run: |
+          node -e "require('node:fs').mkdirSync('.smoke', { recursive: true })"
+          npm pack --pack-destination .smoke
+
+      - name: Smoke test the packed tarball
+        run: node .github/scripts/smoke.mjs
+        env:
+          ZM_DISABLE_KEYCHAIN: '1'

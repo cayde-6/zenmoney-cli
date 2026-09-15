@@ -1,10 +1,10 @@
 import { stringify } from 'yaml'
 import type { Tx } from '../query/model.js'
 import { NO_CATEGORY, isSpendTx, spendSign } from '../query/model.js'
-import { addMonths, localMonth, monthOf } from '../util.js'
+import { addMonths, compareNames, localMonth, monthOf } from '../util.js'
 
-// The window of full months to sample for `budget suggest` (spec: "N полных
-// месяцев перед целевым"). Ends at the month before `targetMonth`, but never
+// The window of full months to sample for `budget suggest`: N full months
+// before the target month. Ends at the month before `targetMonth`, but never
 // later than the month before the current one — the current month is never
 // "full" yet, even when it precedes the target — and spans `months` months
 // back from there.
@@ -30,7 +30,7 @@ interface Pair { path: string; currency: string; value: number; nonZeroMonths: n
 // least half the months. Returns raw yaml text (header comment + `currency`/`limits`).
 // `window` (see suggestWindow) is the explicit from/to of full months to sample;
 // `targetMonth` only appears in the header comment.
-export function suggestBudget(txs: Tx[], window: { from: string; to: string }, targetMonth: string): string {
+export function suggestBudget(txs: Tx[], window: { from: string; to: string }, targetMonth: string, mainCurrency: string): string {
   const monthList: string[] = []
   for (let m = window.from; m <= window.to; m = addMonths(m, 1)) monthList.push(m)
   const months = monthList.length
@@ -68,9 +68,12 @@ export function suggestBudget(txs: Tx[], window: { from: string; to: string }, t
 
   const byCurrencyCount = new Map<string, number>()
   for (const p of kept) byCurrencyCount.set(p.currency, (byCurrencyCount.get(p.currency) ?? 0) + 1)
-  let fileCurrency = ''
+  // Falls back to the main user's currency when there are no qualifying pairs
+  // at all (rather than an empty string, which wouldn't even round-trip
+  // through parseBudgetFile).
+  let fileCurrency = mainCurrency
   let bestCount = -1
-  for (const currency of [...byCurrencyCount.keys()].sort((a, b) => a.localeCompare(b))) {
+  for (const currency of [...byCurrencyCount.keys()].sort(compareNames)) {
     const count = byCurrencyCount.get(currency)!
     if (count > bestCount) {
       bestCount = count
@@ -87,14 +90,14 @@ export function suggestBudget(txs: Tx[], window: { from: string; to: string }, t
 
   const limits: Record<string, number | { amount: number; currency: string }> = {}
   const droppedComments: string[] = []
-  const paths = [...byPath.keys()].sort((a, b) => a.localeCompare(b, 'ru'))
+  const paths = [...byPath.keys()].sort(compareNames)
   for (const path of paths) {
     const pairs = byPath.get(path)!
     pairs.sort((a, b) => {
       if (b.nonZeroMonths !== a.nonZeroMonths) return b.nonZeroMonths - a.nonZeroMonths
       if (a.currency === fileCurrency && b.currency !== fileCurrency) return -1
       if (b.currency === fileCurrency && a.currency !== fileCurrency) return 1
-      return a.currency.localeCompare(b.currency)
+      return compareNames(a.currency, b.currency)
     })
     const [chosen, ...dropped] = pairs
     for (const d of dropped) droppedComments.push(`# also spent: ${d.path} ${d.value} ${d.currency}`)

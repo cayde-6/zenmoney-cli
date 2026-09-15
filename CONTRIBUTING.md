@@ -4,10 +4,10 @@ Thanks for considering a contribution to `zenmoney-cli`.
 
 ## Prerequisites
 
-- Node.js 22.20+ or 24.x for development, matching CI (a build-tool optional
-  dependency declares that engine range). The published CLI itself runs on
-  Node.js >= 22.13, the first 22.x where `node:sqlite` works without a flag.
-  `.nvmrc` pins Node 22 for `nvm use`.
+- Node.js >= 22.13, the first 22.x where `node:sqlite` works without a
+  flag. CI tests 22.13.0, 22, and 24 (`.github/workflows/ci.yml`);
+  development works fine on any of them. `.nvmrc` pins Node 22 for
+  `nvm use`.
 
 ## Setup
 
@@ -24,8 +24,15 @@ npm run build
 |---|---|
 | `npm run build` | bundle `src/` into `dist/` with tsup |
 | `npm test` | run the vitest suite once |
-| `npm run typecheck` | `tsc --noEmit` |
-| `npm run check` | typecheck, then test, then build — run this before opening a PR |
+| `npm run test:coverage` | run the vitest suite with coverage thresholds enforced |
+| `npm run check` | `tsc --noEmit` |
+| `npm run verify` | check, then build, then test:coverage — run this before opening a PR |
+
+Coverage thresholds (`vitest.config.ts`, enforced by `test:coverage`/
+`verify`) are lines/statements/functions 95%, branches 90%, over `src/**`
+(`src/bin.ts` excluded — it's only ever exercised as a spawned subprocess in
+`tests/e2e/bin.test.ts`, never in-process). CI (`.github/workflows/ci.yml`)
+runs `npm run verify` on every push/PR and uploads coverage to Codecov.
 
 ## Project layout
 
@@ -104,6 +111,13 @@ together and why they're built the way they are.
 This repository uses [Conventional Commits](https://www.conventionalcommits.org/)
 (`feat:`, `fix:`, `docs:`, `chore:`, `test:`, etc.), optionally scoped, e.g.
 `fix(budget): reject unknown top-level yaml keys`.
+
+## Releasing
+
+Publishing is maintainer-only: a manual version bump + git tag push, built
+and published by CI. See [`docs/release-checklist.md`](docs/release-checklist.md)
+for the exact steps and [`docs/versioning.md`](docs/versioning.md) for the
+semver rules.
 
 ## Privacy reminder
 

@@ -3,7 +3,7 @@ import type { AppContext } from '../context.js'
 import { addFilterOptions, readFilters, withStore } from '../program.js'
 import { flattenGroups } from '../output.js'
 import { loadDataset } from '../../query/model.js'
-import { applyFilters, currencyWarnings, resolveAccount, resolveCategory, resolvePeriod } from '../../query/filters.js'
+import { applyFilters, currencyWarnings, resolveFilterRefs, resolvePeriod } from '../../query/filters.js'
 import { spendBy, incomeBy, type SpendBy } from '../../analytics/spend.js'
 import { compare, parsePeriod } from '../../analytics/compare.js'
 import { findRecurring, recurringWindow } from '../../analytics/recurring.js'
@@ -18,7 +18,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
     .description('Spend grouped by category, month, or merchant')
     .requiredOption('--by <field>', 'category | month | merchant')
     .option('--tree', 'group category results as a parent/children tree (category only)')
-    .addHelpText('after', '\nExamples:\n  zm spend --by category --month 2026-09\n  zm spend --by month --from 2026-01-01 --category Продукты --owner me\n  zm spend --by merchant --month 2026-09 --currency PLN --format table\n')
+    .addHelpText('after', '\nExamples:\n  zm spend --by category --month 2026-09\n  zm spend --by month --from 2026-01-01 --category Groceries --owner me\n  zm spend --by merchant --month 2026-09 --currency PLN --format table\n')
     .action((opts, cmd) => {
       // Option-shape checks first, before withStore's cache check: a bad --by or
       // an invalid period is wrong regardless of whether a cache exists.
@@ -33,17 +33,16 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
 
       withStore(ctx, cmd, store => {
         const ds = loadDataset(store)
-        const category = filters.category ? resolveCategory(ds, filters.category).path : null
-        const account = filters.account ? resolveAccount(ds, filters.account).id : null
-        const txs = applyFilters(ds, filters)
+        const refs = resolveFilterRefs(ds, filters)
+        const txs = applyFilters(ds, filters, refs)
         const data = spendBy(txs, opts.by as SpendBy, { tree: opts.tree, tags: ds.tags })
 
         return {
           data,
           table: flattenGroups(data),
           meta: {
-            by: opts.by, from: period.from, to: period.to, category,
-            owner: cmd.optsWithGlobals().owner, account, currency: filters.currency ?? null,
+            by: opts.by, from: period.from, to: period.to, category: refs.categoryPath,
+            owner: cmd.optsWithGlobals().owner, account: refs.accountId, currency: filters.currency ?? null,
           },
           warnings: currencyWarnings(ds, filters.currency),
         }
@@ -63,17 +62,16 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
 
       withStore(ctx, cmd, store => {
         const ds = loadDataset(store)
-        const category = filters.category ? resolveCategory(ds, filters.category).path : null
-        const account = filters.account ? resolveAccount(ds, filters.account).id : null
-        const txs = applyFilters(ds, filters)
+        const refs = resolveFilterRefs(ds, filters)
+        const txs = applyFilters(ds, filters, refs)
         const data = incomeBy(txs, opts.by as 'category' | 'month')
 
         return {
           data,
           table: flattenGroups(data),
           meta: {
-            by: opts.by, from: period.from, to: period.to, category,
-            owner: cmd.optsWithGlobals().owner, account, currency: filters.currency ?? null,
+            by: opts.by, from: period.from, to: period.to, category: refs.categoryPath,
+            owner: cmd.optsWithGlobals().owner, account: refs.accountId, currency: filters.currency ?? null,
           },
           warnings: currencyWarnings(ds, filters.currency),
         }
@@ -99,18 +97,17 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
 
       withStore(ctx, cmd, store => {
         const ds = loadDataset(store)
-        const periodTxs = applyFilters(ds, { ...filters, ...periodRange })
-        const vsTxs = applyFilters(ds, { ...filters, ...vsRange })
+        const refs = resolveFilterRefs(ds, filters)
+        const periodTxs = applyFilters(ds, { ...filters, ...periodRange }, refs)
+        const vsTxs = applyFilters(ds, { ...filters, ...vsRange }, refs)
         const data = compare(periodTxs, vsTxs, opts.by as 'total' | 'category')
-        const category = filters.category ? resolveCategory(ds, filters.category).path : null
-        const account = filters.account ? resolveAccount(ds, filters.account).id : null
 
         return {
           data,
-          table: data as unknown as Array<Record<string, string | number | null>>,
+          table: data,
           meta: {
             by: opts.by, period: opts.period, vs: opts.vs,
-            category, account, currency: filters.currency ?? null, owner: cmd.optsWithGlobals().owner,
+            category: refs.categoryPath, account: refs.accountId, currency: filters.currency ?? null, owner: cmd.optsWithGlobals().owner,
           },
           warnings: currencyWarnings(ds, filters.currency),
         }
@@ -125,7 +122,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
     .option('--category <query>', 'category path, id, or unique leaf title')
     .option('--account <query>', 'account id, or unique title substring')
     .option('--currency <code>', 'filter by primary-side currency')
-    .addHelpText('after', '\nExamples:\n  zm recurring\n  zm recurring --months 12 --min-months 4\n  zm recurring --category Подписки\n')
+    .addHelpText('after', '\nExamples:\n  zm recurring\n  zm recurring --months 12 --min-months 4\n  zm recurring --category Subscriptions\n')
     .action((opts, cmd) => {
       const months = Number(opts.months)
       if (!Number.isInteger(months) || months < 1 || months > 36) {
@@ -139,19 +136,18 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
 
       withStore(ctx, cmd, store => {
         const ds = loadDataset(store)
-        const txs = applyFilters(ds, filters)
+        const refs = resolveFilterRefs(ds, filters)
+        const txs = applyFilters(ds, filters, refs)
         const now = ctx.now()
         const data = findRecurring(txs, { months, now, minMonths })
         const window = recurringWindow(months, now)
-        const category = filters.category ? resolveCategory(ds, filters.category).path : null
-        const account = filters.account ? resolveAccount(ds, filters.account).id : null
 
         return {
           data,
-          table: data as unknown as Array<Record<string, string | number | null>>,
+          table: data,
           meta: {
             months, minMonths, from: window.from, to: window.to,
-            category, account, currency: filters.currency ?? null, owner: cmd.optsWithGlobals().owner,
+            category: refs.categoryPath, account: refs.accountId, currency: filters.currency ?? null, owner: cmd.optsWithGlobals().owner,
           },
           warnings: currencyWarnings(ds, filters.currency),
         }

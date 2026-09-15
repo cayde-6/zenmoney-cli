@@ -2,9 +2,10 @@ import type { Command } from 'commander'
 import type { AppContext } from '../context.js'
 import { addFilterOptions, readFilters, withStore } from '../program.js'
 import { categoryPath, loadDataset, meUser, type TxType } from '../../query/model.js'
-import { applyFilters, currencyWarnings, resolveAccount, resolveCategory, resolveOwner, resolvePeriod } from '../../query/filters.js'
+import { applyFilters, currencyWarnings, resolveFilterRefs, resolveOwner, resolvePeriod, usedCurrencies } from '../../query/filters.js'
 import { flattenTxTable } from '../output.js'
 import { ZmError } from '../../errors.js'
+import { compareNames } from '../../util.js'
 
 const TX_TYPES: TxType[] = ['expense', 'income', 'refund', 'transfer', 'debt']
 
@@ -104,7 +105,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
             archived: a.archive,
             owner: loginOf(a.user),
           }))
-          .sort((a, b) => a.title.localeCompare(b.title))
+          .sort((a, b) => compareNames(a.title, b.title))
         return { data }
       })
     })
@@ -119,7 +120,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
         const ds = loadDataset(store)
         const flat = [...ds.tags.values()]
           .map(t => ({ id: t.id, path: categoryPath(t.id, ds.tags), parentId: t.parent, kind: kindOfTag(t) }))
-          .sort((a, b) => a.path.localeCompare(b.path))
+          .sort((a, b) => compareNames(a.path, b.path))
 
         if (!opts.tree) return { data: flat }
 
@@ -144,27 +145,12 @@ export function registerReference(program: Command, ctx: AppContext): void {
         const base = ds.instruments.get(meUser(ds).currency)
         if (!base) throw new ZmError('UNEXPECTED', 'main user currency instrument not found')
 
-        // Both sides of every non-deleted transaction (already loaded in `ds.txs`,
-        // which excludes deleted ones) instead of a second raw store.all('transaction')
-        // parse: the primary side is `t.currency`, and a transfer/debt's other side
-        // is `t.counterpart.currency` — both already resolved to shortTitles by
-        // loadDataset, so instrument ids aren't needed here at all.
-        const usedShortTitles = new Set<string>()
-        for (const a of ds.accounts.values()) {
-          const title = a.instrument !== null ? ds.instruments.get(a.instrument)?.shortTitle : undefined
-          if (title) usedShortTitles.add(title)
-        }
-        for (const t of ds.txs) {
-          usedShortTitles.add(t.currency)
-          if (t.counterpart) usedShortTitles.add(t.counterpart.currency)
-        }
-
         const instrumentByShortTitle = new Map([...ds.instruments.values()].map(i => [i.shortTitle, i] as const))
-        const data = [...usedShortTitles]
+        const data = [...usedCurrencies(ds)]
           .map(title => instrumentByShortTitle.get(title))
           .filter((i): i is NonNullable<typeof i> => i !== undefined)
           .map(i => ({ currency: i.shortTitle, rate: round6(i.rate / base.rate) }))
-          .sort((a, b) => a.currency.localeCompare(b.currency))
+          .sort((a, b) => compareNames(a.currency, b.currency))
 
         return {
           data,
@@ -178,7 +164,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
     .option('--type <types>', 'comma-separated: expense,income,refund,transfer,debt')
     .option('--search <text>', 'substring match on merchant, payee, comment, category')
     .option('--limit <n>', 'max results (default 100)')
-    .addHelpText('after', '\nExamples:\n  zm tx --month 2026-09 --category Продукты\n  zm tx --type expense,refund --search Netflix --limit 20\n  zm tx --from 2026-01-01 --to 2026-01-31 --account "Card PLN"\n')
+    .addHelpText('after', '\nExamples:\n  zm tx --month 2026-09 --category Groceries\n  zm tx --type expense,refund --search Netflix --limit 20\n  zm tx --from 2026-01-01 --to 2026-01-31 --account "Card PLN"\n')
     .action((opts, cmd) => {
       // Option-shape checks first, before withStore's cache check.
       const filters = readFilters(cmd)
@@ -189,9 +175,8 @@ export function registerReference(program: Command, ctx: AppContext): void {
 
       withStore(ctx, cmd, store => {
         const ds = loadDataset(store)
-        const category = filters.category ? resolveCategory(ds, filters.category).path : null
-        const account = filters.account ? resolveAccount(ds, filters.account).id : null
-        const matched = applyFilters(ds, filters)
+        const refs = resolveFilterRefs(ds, filters)
+        const matched = applyFilters(ds, filters, refs)
         const data = matched.slice(0, limit)
 
         return {
@@ -200,9 +185,9 @@ export function registerReference(program: Command, ctx: AppContext): void {
           meta: {
             from: period.from,
             to: period.to,
-            category,
+            category: refs.categoryPath,
             owner: cmd.optsWithGlobals().owner,
-            account,
+            account: refs.accountId,
             currency: filters.currency ?? null,
             type: filters.type ?? null,
             search: filters.search ?? null,

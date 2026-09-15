@@ -4,18 +4,19 @@ import { fileURLToPath } from 'node:url'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import type { AppContext } from './context.js'
-import { printError, printResult, type Format } from './output.js'
+import { printError, printResult, type Format, type TableRow } from './output.js'
 import { ZmError } from '../errors.js'
 import type { Store } from '../store/store.js'
 import { registerSync } from './commands/sync.js'
 import { registerReference } from './commands/reference.js'
 import { registerAnalytics } from './commands/analytics.js'
 import { registerBudget } from './commands/budget.js'
+import { registerStatus } from './commands/status.js'
 import type { Filters } from '../query/filters.js'
 
 // Walks up from this file (dist/program-*.js when built, src/cli/program.ts in
-// tests) to the package.json named zenmoney-cli — that directory is the package
-// root, alongside which SKILL.md and package.json itself live.
+// tests) to the package.json named @cayde-6/zenmoney-cli — that directory is
+// the package root, alongside which SKILL.md and package.json itself live.
 function findPackageRoot(): string {
   let dir = path.dirname(fileURLToPath(import.meta.url))
   for (;;) {
@@ -23,7 +24,7 @@ function findPackageRoot(): string {
     if (existsSync(pkgPath)) {
       const require = createRequire(import.meta.url)
       const pkg = require(pkgPath) as { name?: string }
-      if (pkg.name === 'zenmoney-cli') return dir
+      if (pkg.name === '@cayde-6/zenmoney-cli') return dir
     }
     const parent = path.dirname(dir)
     if (parent === dir) throw new Error('package.json not found while resolving package root')
@@ -31,7 +32,7 @@ function findPackageRoot(): string {
   }
 }
 
-function readVersion(): string {
+export function readVersion(): string {
   const require = createRequire(import.meta.url)
   const pkg = require(path.join(findPackageRoot(), 'package.json')) as { version?: string }
   return pkg.version ?? '0.0.0'
@@ -57,7 +58,7 @@ export function buildProgram(ctx: AppContext): Command {
     .description('Read-only ZenMoney CLI. Agents: see SKILL.md in the package root.')
     .version(readVersion(), '-V, --version')
     .option('--format <format>', 'json | table', 'json')
-    .option('--owner <owner>', 'me | all | user id | login', 'all')
+    .option('--owner <owner>', "me (main user of the family account, i.e. the user with no parent -- not necessarily the token holder) | all | user id | login", 'all')
     .addHelpText('after', `\nAgent guide: ${path.join(findPackageRoot(), 'SKILL.md')}\n`)
     .exitOverride()
     .configureOutput({ writeOut: ctx.stdout, writeErr: writeErrUnlessHandledElsewhere(ctx) })
@@ -65,6 +66,7 @@ export function buildProgram(ctx: AppContext): Command {
   registerReference(program, ctx)
   registerAnalytics(program, ctx)
   registerBudget(program, ctx)
+  registerStatus(program, ctx)
   return program
 }
 
@@ -74,9 +76,9 @@ export function formatOf(cmd: Command): Format {
   return f
 }
 
-// Shared filter options for read commands that operate on transactions/period
-// (Task 4+). `--type` and `--search` are tx-specific and added separately by
-// the command that needs them.
+// Shared filter options for read commands that operate on transactions/period.
+// `--type` and `--search` are tx-specific and added separately by the
+// command that needs them.
 export function addFilterOptions(cmd: Command): Command {
   return cmd
     .option('--from <date>', 'start date, YYYY-MM-DD (inclusive)')
@@ -114,25 +116,37 @@ export function staleWarnings(ctx: AppContext, lastSyncAt: string | null): strin
     const hours = (ctx.now().getTime() - new Date(lastSyncAt).getTime()) / (1000 * 60 * 60)
     if (hours > 24) {
       const days = Math.max(1, Math.floor(hours / 24))
-      warnings.push(`cache is ${days} days old, run zm sync`)
+      warnings.push(`cache is ${days} ${days === 1 ? 'day' : 'days'} old, run zm sync`)
     }
   }
   return warnings
 }
 
-// Shared by read commands (Task 4+): opens the cache, refuses an empty one the
-// same way as a missing one (a failed `sync` can leave a schema-only sqlite file
-// that must not be mistaken for real data), and prints the command's result with
-// a stale-cache warning when the last sync is more than a day old.
+// Shared by withStore and by any command that needs the cache open but skips
+// withStore's own {data, meta} envelope (e.g. `budget suggest`, which
+// intentionally prints raw yaml instead): opens the cache and refuses an
+// empty one the same way as a missing one (a failed `sync` can leave a
+// schema-only sqlite file that must not be mistaken for real data).
+export function openCheckedStore(ctx: AppContext): Store {
+  const store = ctx.openStore()
+  if (!store.hasData()) {
+    store.close()
+    throw new ZmError('NO_CACHE', 'no local cache', 'run zm sync')
+  }
+  return store
+}
+
+// Shared by read commands: opens the cache (openCheckedStore) and prints the
+// command's result with a stale-cache warning when the last sync is more
+// than a day old.
 export function withStore<T>(
   ctx: AppContext,
   cmd: Command,
-  fn: (store: Store) => { data: T; meta?: Record<string, unknown>; table?: Array<Record<string, string | number | null>>; warnings?: string[] },
+  fn: (store: Store) => { data: T; meta?: Record<string, unknown>; table?: TableRow[]; warnings?: string[] },
 ): void {
   const format = formatOf(cmd)
-  const store = ctx.openStore()
+  const store = openCheckedStore(ctx)
   try {
-    if (!store.hasData()) throw new ZmError('NO_CACHE', 'no local cache', 'run zm sync')
     const { data, meta = {}, table, warnings: fnWarnings = [] } = fn(store)
     const { lastSyncAt } = store.getMeta()
     const warnings = [...fnWarnings, ...staleWarnings(ctx, lastSyncAt)]

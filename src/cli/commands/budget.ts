@@ -1,16 +1,17 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stringify } from 'yaml'
 import type { Command } from 'commander'
 import type { AppContext } from '../context.js'
-import { withStore, staleWarnings, formatOf } from '../program.js'
+import { withStore, staleWarnings, formatOf, openCheckedStore } from '../program.js'
 import { categoryPath, loadDataset, meUser } from '../../query/model.js'
 import { applyFilters, isValidMonth } from '../../query/filters.js'
 import { loadBudget } from '../../budget/files.js'
-import { budgetStatus, type BudgetStatus, type StatusRow } from '../../budget/status.js'
+import { budgetStatus, unresolvedLimits, type BudgetStatus, type StatusRow } from '../../budget/status.js'
 import { suggestBudget, suggestWindow } from '../../budget/suggest.js'
-import { addMonths, localMonth } from '../../util.js'
+import { addMonths, compareNames, localMonth } from '../../util.js'
 import { ZmError } from '../../errors.js'
+import { ensureDirMode } from '../../fsutil.js'
 
 function validateMonth(s: string): void {
   if (!isValidMonth(s)) throw new ZmError('INVALID_ARGS', `invalid month: ${s}`, 'use YYYY-MM')
@@ -61,7 +62,7 @@ export function registerBudget(program: Command, ctx: AppContext): void {
         const expensePaths = [...ds.tags.values()]
           .filter(t => t.showOutcome)
           .map(t => categoryPath(t.id, ds.tags))
-          .sort((a, b) => a.localeCompare(b, 'ru'))
+          .sort(compareNames)
 
         // Each commented line is indented as a `limits:` child and built via
         // yaml's own stringify, so uncommenting it (stripping the leading
@@ -72,7 +73,13 @@ export function registerBudget(program: Command, ctx: AppContext): void {
           'limits:',
           ...expensePaths.map(p => `  # ${stringify({ [p]: 0 }).trim()}`),
         ]
-        mkdirSync(ctx.paths.budgetDir, { recursive: true })
+        // Both the config dir itself and the budget dir nested under it need
+        // to end up at 0700: mkdirSync's `recursive: true` (inside
+        // ensureDirMode) silently creates configDir along the way at the
+        // process's default umask, and chmodding only the leaf (budgetDir)
+        // would leave that ancestor at whatever the umask happened to be.
+        ensureDirMode(ctx.paths.configDir, 0o700, ctx.platform)
+        ensureDirMode(ctx.paths.budgetDir, 0o700, ctx.platform)
         writeFileSync(file, lines.join('\n') + '\n')
 
         return { data: { file } }
@@ -90,11 +97,12 @@ export function registerBudget(program: Command, ctx: AppContext): void {
         const owner = cmd.optsWithGlobals().owner
 
         const ds = loadDataset(store)
-        const { limits, sources } = loadBudget(ctx.paths.budgetDir, month)
+        const { limits, sources, keySources } = loadBudget(ctx.paths.budgetDir, month)
+        const { resolvable, unresolved, warnings } = unresolvedLimits(ds, limits, keySources)
         const monthTxs = applyFilters(ds, { month, owner })
-        const data = budgetStatus(ds, limits, monthTxs, month, ctx.now())
+        const data = budgetStatus(ds, resolvable, monthTxs, month, ctx.now(), unresolved)
 
-        return { data, meta: { sources, owner }, table: flattenStatusTable(data) }
+        return { data, meta: { sources, owner }, table: flattenStatusTable(data), warnings }
       })
     })
 
@@ -115,14 +123,17 @@ export function registerBudget(program: Command, ctx: AppContext): void {
       if (opts.month !== undefined) validateMonth(opts.month)
       const targetMonth = opts.month ?? addMonths(localMonth(ctx.now()), 1)
 
-      const store = ctx.openStore()
+      const store = openCheckedStore(ctx)
       try {
-        if (!store.hasData()) throw new ZmError('NO_CACHE', 'no local cache', 'run zm sync')
         const ds = loadDataset(store)
         const owner = cmd.optsWithGlobals().owner
         const txs = applyFilters(ds, { owner })
         const window = suggestWindow(targetMonth, months, ctx.now())
-        const text = suggestBudget(txs, window, targetMonth)
+        const mainCurrency = ds.instruments.get(meUser(ds).currency)?.shortTitle
+        if (mainCurrency === undefined) {
+          throw new ZmError('NO_CACHE', 'cannot determine main currency', 'run zm sync --full')
+        }
+        const text = suggestBudget(txs, window, targetMonth, mainCurrency)
 
         const { lastSyncAt } = store.getMeta()
         for (const w of staleWarnings(ctx, lastSyncAt)) ctx.stderr(`warning: ${w}\n`)

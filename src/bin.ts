@@ -14,6 +14,21 @@ process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
   return originalEmitWarning(warning, ...args)
 }) as typeof process.emitWarning
 
+// See src/cli/streamErrors.ts for why only EPIPE is swallowed here — any
+// other stream error (e.g. ENOSPC) is rethrown and must still surface as a
+// failure (an uncaught exception, non-zero exit), not be silently absorbed
+// just because an 'error' listener now exists on the stream.
+const { classifyWriteStreamError } = await import('./cli/streamErrors.js')
+function handleStreamErrors(stream: NodeJS.WriteStream): void {
+  stream.on('error', (err: NodeJS.ErrnoException) => {
+    const action = classifyWriteStreamError(err, typeof process.exitCode === 'number' ? process.exitCode : undefined)
+    if (action.type === 'exit') process.exit(action.code)
+    else throw err
+  })
+}
+handleStreamErrors(process.stdout)
+handleStreamErrors(process.stderr)
+
 const { run } = await import('./cli/program.js')
 const { realContext } = await import('./cli/context.js')
 

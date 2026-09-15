@@ -1,6 +1,11 @@
 import { it, expect, vi } from 'vitest'
 import { PassThrough } from 'node:stream'
-import { readStdinWithTimeout } from '../../src/cli/context.js'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir, homedir } from 'node:os'
+import { join } from 'node:path'
+import { readStdinWithTimeout, realContext } from '../../src/cli/context.js'
+import { resolvePaths } from '../../src/paths.js'
+import { Store } from '../../src/store/store.js'
 
 // Low-level, stream-based stdin reader behind ctx.readStdin(): the 5s timeout
 // (used by `zm auth` to avoid hanging forever on a pipe that never sends
@@ -65,4 +70,74 @@ it('clears the timer when the stream errors before any data arrives', async () =
   } finally {
     vi.useRealTimers()
   }
+})
+
+// realContext() wiring: paths/keychain selection driven by env/platform/home,
+// which the (test-only) overrides parameter lets these tests pin down
+// deterministically instead of depending on the host this suite runs on.
+// Every real call site (bin.ts) still calls realContext() with no arguments.
+function tempHome(): string {
+  return mkdtempSync(join(tmpdir(), 'zm-realctx-'))
+}
+
+it('resolves paths from process.env/platform/os.homedir() by default (no overrides)', () => {
+  const ctx = realContext()
+  expect(ctx.platform).toBe(process.platform)
+  expect(ctx.paths).toEqual(resolvePaths(process.env, process.platform, homedir()))
+})
+
+it('overrides thread through to resolvePaths exactly as given', () => {
+  const home = tempHome()
+  const env = { XDG_CONFIG_HOME: join(home, 'cfg') }
+  const ctx = realContext({ env, platform: 'linux', home })
+  expect(ctx.paths).toEqual(resolvePaths(env, 'linux', home))
+})
+
+it('enables a real macOS Keychain only on darwin, and only when ZM_DISABLE_KEYCHAIN is not "1"', () => {
+  const home = tempHome()
+  expect(realContext({ env: {}, platform: 'darwin', home }).keychain).not.toBeNull()
+  expect(realContext({ env: { ZM_DISABLE_KEYCHAIN: '1' }, platform: 'darwin', home }).keychain).toBeNull()
+})
+
+it('never enables the Keychain on non-darwin platforms, regardless of ZM_DISABLE_KEYCHAIN', () => {
+  const home = tempHome()
+  expect(realContext({ env: {}, platform: 'linux', home }).keychain).toBeNull()
+  expect(realContext({ env: {}, platform: 'win32', home }).keychain).toBeNull()
+})
+
+it('openStore throws NO_CACHE when the resolved cache db does not exist yet', () => {
+  const ctx = realContext({ env: {}, platform: 'linux', home: tempHome() })
+  expect(() => ctx.openStore()).toThrow(expect.objectContaining({ code: 'NO_CACHE' }))
+})
+
+it('openStore opens the real cache db once it exists', () => {
+  const ctx = realContext({ env: {}, platform: 'linux', home: tempHome() })
+  Store.open(ctx.paths.cacheDb).close()
+  const store = ctx.openStore()
+  expect(store.hasData()).toBe(false)
+  store.close()
+})
+
+it('stdout/stderr write to the real process streams', () => {
+  const ctx = realContext({ env: {}, platform: 'linux', home: tempHome() })
+  const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+  const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  try {
+    ctx.stdout('out-line')
+    ctx.stderr('err-line')
+    expect(outSpy).toHaveBeenCalledWith('out-line')
+    expect(errSpy).toHaveBeenCalledWith('err-line')
+  } finally {
+    outSpy.mockRestore()
+    errSpy.mockRestore()
+  }
+})
+
+it('now() returns the current time, and fetch is wired to the real global fetch', () => {
+  const ctx = realContext({ env: {}, platform: 'linux', home: tempHome() })
+  const before = Date.now()
+  const now = ctx.now().getTime()
+  expect(now).toBeGreaterThanOrEqual(before)
+  expect(now).toBeLessThanOrEqual(Date.now())
+  expect(ctx.fetch).toBe(globalThis.fetch)
 })

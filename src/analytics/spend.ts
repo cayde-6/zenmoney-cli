@@ -1,7 +1,7 @@
 import type { Tx } from '../query/model.js'
 import { NO_CATEGORY, isSpendTx, spendSign } from '../query/model.js'
 import type { ZmTag } from '../api/types.js'
-import { monthOf, round2 } from '../util.js'
+import { compareNames, monthOf, round2 } from '../util.js'
 import { ZmError } from '../errors.js'
 
 export interface Amount { currency: string; amount: number; count: number }
@@ -21,17 +21,17 @@ export function sumByCurrency(txs: Tx[], sign: (t: Tx) => number): Amount[] {
   }
   return [...totals.entries()]
     .map(([currency, v]) => ({ currency, amount: round2(v.amount), count: v.count }))
-    .sort((a, b) => a.currency.localeCompare(b.currency))
+    .sort((a, b) => compareNames(a.currency, b.currency))
 }
 
 function keyOf(t: Tx, by: 'category' | 'month' | 'merchant'): string {
   if (by === 'category') return t.categoryPath
   if (by === 'month') return monthOf(t.date)
-  return t.merchant ?? '(без получателя)'
+  return t.merchant ?? '(no merchant)'
 }
 
 function compareKeys(by: 'category' | 'month' | 'merchant', a: string, b: string): number {
-  return by === 'month' ? (a < b ? -1 : a > b ? 1 : 0) : a.localeCompare(b, 'ru')
+  return by === 'month' ? (a < b ? -1 : a > b ? 1 : 0) : compareNames(a, b)
 }
 
 function groupTxs(txs: Tx[], by: 'category' | 'month' | 'merchant', sign: (t: Tx) => number): Group[] {

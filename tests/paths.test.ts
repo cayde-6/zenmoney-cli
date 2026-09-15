@@ -28,3 +28,15 @@ it('windows with no APPDATA/LOCALAPPDATA falls back under home', () => {
   expect(p.configDir).toBe('C:\\Users\\u\\AppData\\Roaming\\zm')
   expect(p.cacheDir).toBe('C:\\Users\\u\\AppData\\Local\\zm')
 })
+// A-22: per the XDG Base Directory spec, a relative XDG_*_HOME value is
+// invalid and must be treated as unset (fall back to the default).
+it('ignores a relative XDG_CONFIG_HOME/XDG_CACHE_HOME, falling back to defaults', () => {
+  const p = resolvePaths({ XDG_CONFIG_HOME: 'relative/cfg', XDG_CACHE_HOME: 'relative/cache' }, 'linux', '/home/u')
+  expect(p.configDir).toBe('/home/u/.config/zm')
+  expect(p.cacheDir).toBe('/home/u/.cache/zm')
+})
+it('still honors an absolute XDG_CONFIG_HOME/XDG_CACHE_HOME', () => {
+  const p = resolvePaths({ XDG_CONFIG_HOME: '/x/cfg', XDG_CACHE_HOME: '/x/cache' }, 'linux', '/home/u')
+  expect(p.configDir).toBe('/x/cfg/zm')
+  expect(p.cacheDir).toBe('/x/cache/zm')
+})

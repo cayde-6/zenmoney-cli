@@ -14,23 +14,29 @@ src/
   bin.ts        entry point: suppresses the node:sqlite experimental warning, calls cli/program
   cli/          commander wiring: global options, command registration, json/table output, exit codes
     commands/   one file per command group: sync (auth+sync), reference (users/accounts/categories/rates/tx),
-                analytics (spend/income/compare/recurring), budget (init/status/suggest)
+                analytics (spend/income/compare/recurring), budget (init/status/suggest), status (top-level `zm status`)
   api/          ZenMoney API client (POST /v8/diff) and the raw entity types it returns
   store/        SQLite cache: schema, diff application, meta (serverTimestamp, lastSyncAt)
   query/        query/model.ts classifies raw transactions into typed Tx and builds the Dataset;
                 query/filters.ts resolves and applies period/category/account/owner/currency/search filters
   analytics/    pure functions over Tx[]: spend/income grouping, period comparison, recurring detection
-  budget/       yaml budget files (load/merge/validate), status (plan vs actual), suggest (draft from history)
+  budget/       files.ts does the module's only fs I/O (reads/validates yaml budget files); status.ts (plan vs
+                actual, reusing analytics/spend.ts's spendBy for its `unplanned` block) and suggest.ts (draft
+                from history) are pure functions over already-loaded data, like analytics/
   auth/         token resolution and storage (env, macOS Keychain, config.json)
   errors.ts     ZmError and the error-code -> exit-code table
   paths.ts      XDG-aware config/cache paths
   util.ts       date/month arithmetic, rounding, fuzzy-match suggestions
 ```
 
-Dependencies are one-directional: `cli → analytics | budget → query → store`.
-`api` is only reached from `cli/commands/sync.ts` (`zm auth`, `zm sync`).
-`query`, `analytics`, and `budget` are pure/synchronous and tested against an
-in-memory SQLite store, with no network involved.
+Dependencies are one-directional: `cli → budget → analytics → query → store`
+(`budget/status.ts` reuses `analytics/spend.ts`'s `spendBy` for its
+`unplanned` block; `cli` also depends on `analytics` and `query` directly for
+commands that don't go through `budget`). `api` is only reached from
+`cli/commands/sync.ts` (`zm auth`, `zm sync`). `query` and `analytics` are
+pure/synchronous and tested against an in-memory SQLite store, with no
+network involved; `budget` is pure/synchronous too except `files.ts`, which
+does real fs I/O (reading/writing yaml budget files).
 
 ## Data flow
 
@@ -79,12 +85,23 @@ in-memory SQLite store, with no network involved.
 The primary side determines the `Tx`'s reported `amount`, `currency`,
 `accountId`/`accountTitle`, and `ownerId`. A `transfer` or `debt` also
 carries a `counterpart` object for the other side. Category is the first id
-in the transaction's `tag` array (or `null` for "Без категории"); a
+in the transaction's `tag` array (or `null` for "Uncategorized"); a
 category's full path is built by walking `tag.parent` links to the root.
 "Spend" (used by `spend`, `compare`, and the budget commands) is defined as
 `expense` transactions counting positively and `refund` transactions
 counting negatively (`query/model.ts: isSpendTx`/`spendSign`) — `income`,
 `transfer`, and `debt` are never spend.
+
+`ZmTransaction` also models a few raw ZenMoney fields this CLI doesn't
+otherwise interpret: `hold` and `originalPayee` are surfaced on `Tx` (and
+thus on `zm tx`) — `hold` is ZenMoney's own marker for a not-yet-settled/
+pending transaction, and `originalPayee` is the payee text ZenMoney recorded
+before any user edit/merchant resolution. Neither affects classification or
+aggregation; a `hold` transaction is classified and counted exactly like a
+normal, settled one. `opIncome`/`opOutcome`/`opIncomeInstrument`/
+`opOutcomeInstrument` are typed-only: kept on `ZmTransaction` so they're
+preserved in the cache's raw json (and round-trip if the cache is ever
+inspected directly), but are **not** surfaced on `Tx` or in `zm tx` output.
 
 ## Owner semantics
 
@@ -93,20 +110,97 @@ side** — not the transaction's own `user` field. A shared account can carry
 operations recorded by either family member; attributing owner to the
 account (not the raw transaction owner) is what makes `--owner me` mean "my
 accounts' activity." `zm users` lists the account's users; `me` resolves to
-the user with no `parent` (ZenMoney's main/family-owner user), `all` (the
-default) applies no owner filter, and any other value is matched against a
-numeric id or a login.
+the user with no `parent` (ZenMoney's main/family-owner user — the main user
+of the family account, not necessarily whoever's API token this CLI is
+using), `all` (the default) applies no owner filter, and any other value is
+matched against a numeric id or a login.
 
 ## Caching and stale warning
 
 Every read command (`withStore` in `cli/program.ts`) opens the cache,
 rejects an empty or missing one with a `NO_CACHE` error, and after running,
 checks `lastSyncAt`: if the last sync is more than 24 hours old, a top-level
-`warnings` array entry (`"cache is N days old, run zm sync"`) is added to
-the JSON envelope (or printed as `warning: ...` lines for `--format table`
-and for `zm budget suggest`, which has no envelope). This is a warning, not
-an error — stale data is still returned, so an agent can decide whether to
-sync first.
+`warnings` array entry (`"cache is 1 day old, run zm sync"`, or `"cache is N
+days old, ..."` for N > 1) is added to the JSON envelope (or printed as
+`warning: ...` lines for `--format table` and for `zm budget suggest`, which
+has no envelope). This is a warning, not an error — stale data is still
+returned, so an agent can decide whether to sync first.
+
+`zm status` (`cli/commands/status.ts`) is the one command with none of the
+above constraints: it never opens a network connection, never requires a
+token, and never touches `Store` at all — it never intentionally mutates
+the cache, but "read-only" for a WAL-mode SQLite database is nuanced enough
+that this needs stating precisely rather than as a blanket "never creates
+files". It tries two approaches, in order:
+
+1. A URI filename (`file:<path>?mode=ro&immutable=1`, still passing
+   `{ readOnly: true }`) reads the database without creating any `-wal`/
+   `-shm` sidecar file at all — a plain read-only `DatabaseSync` on a
+   WAL-mode database still needs to create `-shm` (the shared-memory WAL
+   index) just to read consistently, even though it never writes to the
+   database itself; `immutable` skips that machinery entirely, which also
+   means a directory that isn't writable (so a normal connection couldn't
+   create `-shm` there, failing with `SQLITE_READONLY_CANTINIT`) is no
+   obstacle. The cost: an immutable connection never looks at `-wal`, so any
+   not-yet-checkpointed data in it is invisible. Only attempted when `-wal`
+   doesn't exist at all — a cleanly-closed cache never has one, so this
+   covers the common case; existence, not merely a non-empty file, is what
+   gates it, since a connection actively writing under
+   `PRAGMA locking_mode=EXCLUSIVE` can leave `-wal` at 0 bytes for the
+   whole span of a transaction.
+2. Otherwise (a `-wal` file exists, or the URI approach itself didn't pan
+   out), a plain read-only open — this sees WAL data correctly and
+   participates in normal SQLite locking (a `PRAGMA busy_timeout` is set so
+   a transient lock, e.g. a concurrent `zm sync` mid-write, is waited out
+   rather than immediately reported as unreadable), but can need to create
+   `-wal`/`-shm` as a side effect of opening. Unlike an earlier version of
+   this code, any such sidecar file is deliberately left in place afterwards
+   rather than deleted: another process (e.g. a concurrent `zm sync`) could
+   start relying on that same sidecar the instant this connection closes,
+   and deleting it out from under that process risks corrupting its view of
+   the database. So `zm status`, in this rare fallback case, may leave
+   `-wal`/`-shm` sidecar files behind next to the cache — it never modifies
+   the database's own contents either way.
+
+Either way, a missing/corrupted/permission-denied file is reported via
+`{ path, exists, readable, lastSyncAt, ageHours, error? }` rather than
+thrown: `exists: false` when the file is missing (nothing more to open),
+`readable: false` with an `error` message when it exists but can't be
+opened/queried — these cases are indistinguishable from each other by
+design, since `zm status` is a diagnostic snapshot, not a repair tool. Its
+`token.source` reuses `auth/token.ts`'s resolution order (env, then
+Keychain, then `config.json`) but reports only which one matched, via a
+`tokenSource` export shared with `resolveToken` — the token's actual value
+is never read for display.
+
+`Store.open` (`store/store.ts`) creates the cache dir at mode `0700`, opens
+the database with `PRAGMA journal_mode=WAL` and an injectable
+`busy_timeout` (default 5000ms, `Store.open(file, { busyTimeoutMs })`), then
+chmods the db file (and any `-wal`/`-shm` sidecar files WAL leaves behind)
+to `0600` — skipped silently on win32, which has no POSIX permission bits.
+Every `Store` method that touches the database (`open`, `migrate`,
+`applyDiff`, `reset`, `getMeta`, `all`) funnels a thrown sqlite error
+through one classifier comparing `errcode & 0xff` (the primary result code;
+the low byte, since an "extended" code like `SQLITE_BUSY_RECOVERY` still
+counts as a plain busy):
+
+- `SQLITE_BUSY`/`SQLITE_LOCKED` (5/6) → `CACHE_BUSY` (exit 6) — the cache is
+  locked by another connection (e.g. a concurrent `zm sync` writing); the
+  caller should just retry. This is not limited to `open`: a lock conflict
+  is at least as likely on a write (`applyDiff`/`reset`) as on open.
+- `SQLITE_CORRUPT`/`SQLITE_NOTADB` (11/26), or a `JSON.parse` failure on a
+  stored row's `raw` column → the existing `NO_CACHE` "cache is unreadable"
+  error (hint: `delete <path> and run zm sync --full`). `zm sync --full`
+  recovers from this specific case automatically, by deleting the cache
+  file (and sidecars) and recreating it before fetching.
+- Anything else (`SQLITE_READONLY`, `SQLITE_CANTOPEN`, `SQLITE_FULL`,
+  `SQLITE_IOERR`, ...) → `UNEXPECTED`, carrying the underlying sqlite
+  message as-is. These are real, distinct failures (a read-only filesystem,
+  a missing directory, a full disk, ...) and must never be mistaken for
+  corruption — in particular, `sync --full`'s delete-and-recreate recovery
+  only ever triggers on `NO_CACHE`, so it never deletes a perfectly good
+  cache file just because the disk happened to be full or the directory
+  briefly unwritable.
 
 ## Token storage flow
 
@@ -118,7 +212,9 @@ endpoint before it's ever saved — this uses the token just supplied on this
 invocation, not a stored one, so `zm auth` never calls `resolveToken`.
 `saveToken` (`auth/token.ts`) prefers the macOS Keychain (service
 `zenmoney-cli`) when available, falling back to `~/.config/zm/config.json`
-(mode 0600) elsewhere or on failure. A stored token is only looked up by
+elsewhere or on failure — written atomically (a mode-0600 temp file in the
+same dir, renamed into place, so there's never a window where the file
+exists at a more permissive mode). A stored token is only looked up by
 commands that call the ZenMoney API: `zm sync` calls `requireToken`
 (`resolveToken`, throwing `AUTH` if nothing is found), checking in order the
 `ZENMONEY_TOKEN` env var, then the Keychain, then `config.json`. Every read
@@ -141,7 +237,8 @@ shape. `cli/output.ts: printError` prints `{"error": {"code", "message",
 | `INVALID_ARGS` | 2 | bad flags, invalid/unknown budget yaml, or a missing budget file |
 | `AUTH` | 3 | no token, ZenMoney rejected it (401/403), or the token could not be stored |
 | `NETWORK` | 4 | network failure or non-2xx ZenMoney response |
-| `NO_CACHE` | 5 | no local cache yet (`zm sync` hasn't run) |
+| `NO_CACHE` | 5 | no local cache yet (`zm sync` hasn't run), or the cache file/a row is corrupted |
+| `CACHE_BUSY` | 6 | cache is locked by another connection (e.g. a concurrent `zm sync`) |
 
 Option-shape validation (e.g. an unknown `--by`, an invalid `--month`) runs
 *before* the cache is opened, so a bad invocation fails the same way whether
@@ -207,7 +304,7 @@ months, and never suggesting a limit `<= 0`.
   --token <token>` is documented as the least-preferred way to supply a
   token.
 - **Duplicate limit key is a hard error.** If two budget keys (e.g.
-  `Кафе` and `Еда/Кафе`, spelled differently but resolving to the same
+  `Cafe` and `Food/Cafe`, spelled differently but resolving to the same
   category) both appear in the merged limit map — whether both are in the
   same file or one is in the template and the other in a month file —
   `budget status` refuses to guess which one is "current" and errors out

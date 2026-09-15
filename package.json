@@ -1,5 +1,5 @@
 {
-  "name": "zenmoney-cli",
+  "name": "@cayde-6/zenmoney-cli",
   "version": "0.1.0",
   "description": "Read-only ZenMoney CLI for agents: transactions, per-currency analytics and a local budget",
   "type": "module",
@@ -18,9 +18,11 @@
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test && npm run build",
-    "prepublishOnly": "npm run check"
+    "test:coverage": "vitest run --coverage",
+    "check": "tsc --noEmit",
+    "verify": "npm run check && npm run build && npm run test:coverage",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run verify"
   },
   "keywords": [
     "zenmoney",
@@ -33,7 +35,10 @@
     "llm",
     "sqlite"
   ],
-  "author": "cayde-6",
+  "author": {
+    "name": "cayde-6",
+    "url": "https://github.com/cayde-6"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cayde-6/zenmoney-cli.git"
@@ -43,14 +48,22 @@
     "url": "https://github.com/cayde-6/zenmoney-cli/issues"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "dependencies": {
     "commander": "^14.0.3",
     "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",
+    "@vitest/coverage-v8": "^5.0.1",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.7"
+    "vitest": "^5.0.1"
+  },
+  "overrides": {
+    "esbuild": "0.27.2"
   }
 }

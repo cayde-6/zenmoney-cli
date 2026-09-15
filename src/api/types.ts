@@ -16,6 +16,15 @@ export interface ZmTransaction {
   incomeInstrument: number; outcomeInstrument: number
   tag: string[] | null; merchant: string | null; payee: string | null; comment: string | null
   deleted: boolean; created: number; changed: number
+  // Present on some raw ZenMoney transactions but not otherwise modeled by
+  // this CLI: kept on the type (and thus preserved verbatim in the cache's
+  // raw json and in `zm tx` output) rather than silently dropped.
+  // `hold` marks a not-yet-settled ("pending") transaction; it's classified
+  // and aggregated exactly like a normal one — see docs/architecture.md.
+  hold?: boolean
+  opIncome?: number; opOutcome?: number
+  opIncomeInstrument?: number; opOutcomeInstrument?: number
+  originalPayee?: string | null
 }
 export interface ZmDeletion { id: string; object: string; stamp: number; user: number }
 export interface ZmDiff {

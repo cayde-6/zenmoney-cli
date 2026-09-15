@@ -1,9 +1,9 @@
 import { it, expect } from 'vitest'
-import { applyKeystrokes } from '../../src/cli/commands/sync.js'
+import { applyKeystrokes, promptHidden, type HiddenInputStream } from '../../src/cli/commands/sync.js'
 
-// Pure byte-handling helper behind promptHidden's raw-mode TTY reading. The
-// raw-mode wiring itself (process.stdin.setRawMode etc.) is untested — see the
-// comment above promptHidden in src/cli/commands/sync.ts.
+// Pure byte-handling helper behind promptHidden's raw-mode TTY reading.
+// promptHidden's own raw-mode wiring is exercised below via a fake
+// HiddenInputStream (see "promptHidden" tests further down).
 
 it('accumulates normal characters across chunks', () => {
   let r = applyKeystrokes('', 'ab')
@@ -114,4 +114,42 @@ it('a control byte also aborts an unfinished SS3 sequence and is then processed 
   expect(r1.pending).toBe('\x1bO')
   const r2 = applyKeystrokes(r1.value, '\r', r1.pending)
   expect(r2).toEqual({ value: 'ab', done: true, cancelled: false })
+})
+
+// promptHidden's raw-mode TTY wiring, driven via a fake HiddenInputStream
+// instead of a real terminal (see the HiddenInputStream export on
+// src/cli/commands/sync.ts, added specifically so this is testable).
+function fakeStdin(chunks: string[]): { stdin: HiddenInputStream; calls: string[] } {
+  const calls: string[] = []
+  const stdin: HiddenInputStream = {
+    setRawMode: m => { calls.push(`setRawMode(${m})`) },
+    resume: () => { calls.push('resume') },
+    pause: () => { calls.push('pause') },
+    setEncoding: e => { calls.push(`setEncoding(${e})`) },
+    [Symbol.asyncIterator]: async function* () {
+      for (const c of chunks) yield c
+    },
+  }
+  return { stdin, calls }
+}
+
+it('promptHidden writes the prompt, enables raw mode, and resolves with the typed token', async () => {
+  const written: string[] = []
+  const { stdin, calls } = fakeStdin(['sec', 'ret\r'])
+  const result = await promptHidden('token: ', { stdin, writeErr: s => written.push(s) })
+  expect(result).toBe('secret')
+  expect(written).toEqual(['token: ', '\n'])
+  expect(calls).toEqual(['setRawMode(true)', 'resume', 'setEncoding(utf8)', 'setRawMode(false)', 'pause'])
+})
+
+it('promptHidden rejects with "cancelled" on Ctrl-C, still disabling raw mode', async () => {
+  const { stdin, calls } = fakeStdin(['abc\x03'])
+  await expect(promptHidden('token: ', { stdin, writeErr: () => {} })).rejects.toMatchObject({ code: 'INVALID_ARGS', message: 'cancelled' })
+  expect(calls).toContain('setRawMode(false)')
+  expect(calls).toContain('pause')
+})
+
+it('promptHidden rejects with "empty token" if the stream ends without a terminator', async () => {
+  const { stdin } = fakeStdin(['abc'])
+  await expect(promptHidden('token: ', { stdin, writeErr: () => {} })).rejects.toMatchObject({ code: 'INVALID_ARGS', message: 'empty token' })
 })

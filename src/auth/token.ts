@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { dirname, join } from 'node:path'
 import { ZmError } from '../errors.js'
+import { ensureDirMode } from '../fsutil.js'
 
 export interface Keychain {
   get(): string | null
@@ -70,6 +72,7 @@ export interface TokenDeps {
   env: Record<string, string | undefined>
   keychain: Keychain | null
   configFile: string
+  platform?: NodeJS.Platform
 }
 
 function nonEmpty(s: string | null | undefined): string | null {
@@ -87,21 +90,48 @@ function readConfig(file: string): Record<string, unknown> {
   }
 }
 
-function writeConfig(file: string, obj: Record<string, unknown>): void {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-  writeFileSync(file, JSON.stringify(obj, null, 2), { mode: 0o600 })
-  // writeFileSync's mode only applies when the file is created; chmod explicitly
-  // so an existing (possibly more permissive) config file also ends up at 0o600.
-  chmodSync(file, 0o600)
+function writeConfig(file: string, obj: Record<string, unknown>, platform: NodeJS.Platform = process.platform): void {
+  const dir = dirname(file)
+  ensureDirMode(dir, 0o700, platform)
+  // Written to a temp file (already created at 0o600, so the token is never
+  // briefly readable at the default umask) in the same dir, then renamed into
+  // place: a crash or concurrent read between write and chmod could otherwise
+  // observe config.json at a more permissive mode for a moment.
+  const tmp = join(dir, `.config.json.${process.pid}.${randomBytes(6).toString('hex')}.tmp`)
+  try {
+    writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 })
+    renameSync(tmp, file)
+  } catch (e) {
+    // Never leave an orphaned temp file behind, whether the write itself
+    // failed (nothing to remove — a safe no-op) or the rename did (the temp
+    // file exists but must not survive as a random extra file in the config dir).
+    try { unlinkSync(tmp) } catch { /* nothing to clean up */ }
+    throw e
+  }
+}
+
+export type TokenSource = 'env' | 'keychain' | 'config'
+
+function resolveTokenWithSource(deps: TokenDeps): { token: string | null; source: TokenSource | null } {
+  const fromEnv = nonEmpty(deps.env.ZENMONEY_TOKEN)
+  if (fromEnv) return { token: fromEnv, source: 'env' }
+  const fromKeychain = nonEmpty(deps.keychain?.get() ?? null)
+  if (fromKeychain) return { token: fromKeychain, source: 'keychain' }
+  const config = readConfig(deps.configFile)
+  const fromConfig = nonEmpty(typeof config.token === 'string' ? config.token : null)
+  if (fromConfig) return { token: fromConfig, source: 'config' }
+  return { token: null, source: null }
 }
 
 export function resolveToken(deps: TokenDeps): string | null {
-  const fromEnv = nonEmpty(deps.env.ZENMONEY_TOKEN)
-  if (fromEnv) return fromEnv
-  const fromKeychain = nonEmpty(deps.keychain?.get() ?? null)
-  if (fromKeychain) return fromKeychain
-  const config = readConfig(deps.configFile)
-  return nonEmpty(typeof config.token === 'string' ? config.token : null)
+  return resolveTokenWithSource(deps).token
+}
+
+// Same lookup/precedence as resolveToken, but reports only *where* a token
+// was found — never the token value itself. Used by `zm status`, which must
+// never print a token.
+export function tokenSource(deps: TokenDeps): TokenSource | null {
+  return resolveTokenWithSource(deps).source
 }
 
 export function saveToken(token: string, deps: TokenDeps): 'keychain' | 'config' {
@@ -133,7 +163,7 @@ export function saveToken(token: string, deps: TokenDeps): 'keychain' | 'config'
   }
   const config = readConfig(deps.configFile)
   config.token = token
-  writeConfig(deps.configFile, config)
+  writeConfig(deps.configFile, config, deps.platform)
   return 'config'
 }
 
@@ -142,7 +172,7 @@ export function removeToken(deps: TokenDeps): void {
   if (existsSync(deps.configFile)) {
     const config = readConfig(deps.configFile)
     delete config.token
-    writeConfig(deps.configFile, config)
+    writeConfig(deps.configFile, config, deps.platform)
   }
 }
 

@@ -4,11 +4,15 @@ import type { Tx } from '../query/model.js'
 
 export type Format = 'json' | 'table'
 
+// `boolean` is included alongside string/number/null so a flat field like
+// Tx.hold doesn't need a cast or stringification just to appear in a table.
+export type TableRow = Record<string, string | number | boolean | null>
+
 export interface Envelope<T> {
   data: T
   meta: Record<string, unknown>
   warnings?: string[]
-  table?: Array<Record<string, string | number | null>>
+  table?: TableRow[]
 }
 
 function isFlatObjectArray(data: unknown): data is Record<string, unknown>[] {
@@ -29,7 +33,15 @@ function writeTable(rows: Record<string, unknown>[], write: (s: string) => void)
       if (!keys.includes(k)) keys.push(k)
     }
   }
-  const widths = keys.map(k => Math.max(k.length, ...rows.map(r => String(r[k] ?? '').length)))
+  // A loop rather than `Math.max(...rows.map(...))`: spreading a huge array as
+  // call arguments can overflow the stack (tested at 200k rows).
+  const widths = keys.map(k => k.length)
+  for (const row of rows) {
+    for (let i = 0; i < keys.length; i++) {
+      const len = String(row[keys[i]!] ?? '').length
+      if (len > widths[i]!) widths[i] = len
+    }
+  }
   write(keys.map((k, i) => k.padEnd(widths[i]!)).join('  ') + '\n')
   for (const row of rows) {
     write(keys.map((k, i) => String(row[k] ?? '').padEnd(widths[i]!)).join('  ') + '\n')
@@ -75,7 +87,7 @@ export function flattenGroups(groups: Group[]): Array<Record<string, string | nu
 // Flattens `tx` rows for `--format table`: a transfer/debt's nested `counterpart`
 // object would otherwise make the whole result fail the "flat object array"
 // check and fall back to a raw JSON dump, so it's spread into three columns.
-export function flattenTxTable(txs: Tx[]): Array<Record<string, string | number | null>> {
+export function flattenTxTable(txs: Tx[]): TableRow[] {
   return txs.map(t => {
     const { counterpart, ...rest } = t
     return {

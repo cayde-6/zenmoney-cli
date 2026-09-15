@@ -68,10 +68,19 @@ export function readStdinWithTimeout(stream: Readable, ms = 5000): Promise<strin
   })
 }
 
-export function realContext(): AppContext {
-  const env = process.env
-  const platform = process.platform
-  const home = os.homedir()
+// `overrides` exists only so tests can inject a deterministic env/platform/home
+// (e.g. to exercise the darwin-only Keychain branch, or the win32 chmod-skip
+// paths, without depending on the host this test suite happens to run on) —
+// every real call site (bin.ts) calls realContext() with no arguments, so the
+// defaults below are exactly the previous, unconditional behavior.
+export function realContext(overrides: {
+  env?: Record<string, string | undefined>
+  platform?: NodeJS.Platform
+  home?: string
+} = {}): AppContext {
+  const env = overrides.env ?? process.env
+  const platform = overrides.platform ?? process.platform
+  const home = overrides.home ?? os.homedir()
   const paths = resolvePaths(env, platform, home)
   return {
     env,
@@ -88,7 +97,7 @@ export function realContext(): AppContext {
     keychain: platform === 'darwin' && env.ZM_DISABLE_KEYCHAIN !== '1' ? macKeychain() : null,
     openStore: () => {
       if (!existsSync(paths.cacheDb)) throw new ZmError('NO_CACHE', 'no local cache', 'run zm sync')
-      return Store.open(paths.cacheDb)
+      return Store.open(paths.cacheDb, { platform })
     },
   }
 }
