@@ -7,6 +7,7 @@ import type { AppContext } from '../context.js'
 import { formatOf, readVersion } from '../program.js'
 import { printResult } from '../output.js'
 import { tokenSource } from '../../auth/token.js'
+import { ownersFilePath } from '../../query/owners.js'
 import { round1 } from '../../util.js'
 
 interface CacheInfo { path: string; exists: boolean; readable: boolean; lastSyncAt: string | null; ageHours: number | null; error?: string }
@@ -302,12 +303,14 @@ export function registerStatus(program: Command, ctx: AppContext): void {
 
       // Only *where* a token would come from, never its value.
       const source = tokenSource({ env: ctx.env, keychain: ctx.keychain, configFile: ctx.paths.configFile })
+      const ownersPath = ownersFilePath(ctx.paths.configDir)
 
       const data = {
         cache,
         token: { source },
         configDir: ctx.paths.configDir,
         budgetDir: ctx.paths.budgetDir,
+        ownersFile: { path: ownersPath, exists: existsSync(ownersPath) },
         version: readVersion(),
       }
       printResult({ data, meta: {} }, format, ctx.stdout)

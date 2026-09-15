@@ -2,10 +2,12 @@ import type { Command } from 'commander'
 import type { AppContext } from '../context.js'
 import { addFilterOptions, readFilters, withStore } from '../program.js'
 import { categoryPath, loadDataset, meUser, type TxType } from '../../query/model.js'
-import { applyFilters, currencyWarnings, resolveFilterRefs, resolveOwner, resolvePeriod, usedCurrencies } from '../../query/filters.js'
+import { applyFilters, currencyWarnings, ownerNameMatches, resolveFilterRefs, resolveOwner, resolveOwnerName, resolvePeriod, usedCurrencies } from '../../query/filters.js'
+import { loadOwnersFile, ownersFilePath } from '../../query/owners.js'
 import { flattenTxTable } from '../output.js'
 import { ZmError } from '../../errors.js'
 import { compareNames } from '../../util.js'
+import type { ZmAccount } from '../../api/types.js'
 
 const TX_TYPES: TxType[] = ['expense', 'income', 'refund', 'transfer', 'debt']
 
@@ -89,12 +91,20 @@ export function registerReference(program: Command, ctx: AppContext): void {
     .addHelpText('after', '\nExamples:\n  zm accounts\n  zm accounts --archived --owner me\n')
     .action((opts, cmd) => {
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store)
-        const ownerIds = resolveOwner(ds, cmd.optsWithGlobals().owner)
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
         const loginOf = (userId: number) => ds.users.find(u => u.id === userId)?.login ?? String(userId)
+        // Once owners.yaml exists, `owner` reports the file's owner name (or
+        // null when unassigned) instead of the ZenMoney login, and --owner
+        // filters by that name/unassigned/all instead of by ZenMoney user.
+        const ownerOf = (a: ZmAccount): string | null => ds.ownerNames !== null ? (ds.ownerOf.get(a.id) ?? null) : loginOf(a.user)
+        const matchesOwnerFilter = (a: ZmAccount): boolean => {
+          if (ds.ownerNames !== null) return ownerNameMatches(resolveOwnerName(ds.ownerNames, cmd.optsWithGlobals().owner), ds.ownerOf.get(a.id) ?? null)
+          const ownerIds = resolveOwner(ds, cmd.optsWithGlobals().owner)
+          return ownerIds === null || ownerIds.has(a.user)
+        }
         const data = [...ds.accounts.values()]
           .filter(a => opts.archived || !a.archive)
-          .filter(a => ownerIds === null || ownerIds.has(a.user))
+          .filter(matchesOwnerFilter)
           .map(a => ({
             id: a.id,
             title: a.title,
@@ -103,10 +113,41 @@ export function registerReference(program: Command, ctx: AppContext): void {
             balance: a.balance,
             inBalance: a.inBalance,
             archived: a.archive,
-            owner: loginOf(a.user),
+            owner: ownerOf(a),
           }))
           .sort((a, b) => compareNames(a.title, b.title))
         return { data }
+      })
+    })
+
+  program.command('owners')
+    .description('List owners.yaml and which accounts each owner maps to (no network)')
+    .option('--archived', 'include archived accounts')
+    .addHelpText('after', '\nExamples:\n  zm owners\n  zm owners --archived\n')
+    .action((opts, cmd) => {
+      rejectOwner(cmd, 'owners')
+      withStore(ctx, cmd, store => {
+        const filePath = ownersFilePath(ctx.paths.configDir)
+        const ownersFile = loadOwnersFile(ctx.paths.configDir)
+        const ds = loadDataset(store, ownersFile)
+        const toRef = (a: ZmAccount): { id: string; title: string } => ({ id: a.id, title: a.title })
+        const accountsList = [...ds.accounts.values()].filter(a => opts.archived || !a.archive)
+
+        if (ownersFile === null) {
+          const data: { file: string | null; owners: { name: string; accounts: { id: string; title: string }[] }[]; unassigned: { id: string; title: string }[] } =
+            { file: null, owners: [], unassigned: accountsList.map(toRef) }
+          return {
+            data,
+            warnings: [`no owners.yaml found — create ${filePath} to split accounts by family member (see README's Owners section)`],
+          }
+        }
+
+        const owners = ds.ownerNames!.map(name => ({
+          name,
+          accounts: accountsList.filter(a => ds.ownerOf.get(a.id) === name).map(toRef),
+        }))
+        const unassigned = accountsList.filter(a => !ds.ownerOf.has(a.id)).map(toRef)
+        return { data: { file: filePath as string | null, owners, unassigned } }
       })
     })
 
@@ -174,7 +215,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
       const period = resolvePeriod(filters)
 
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store)
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
         const refs = resolveFilterRefs(ds, filters)
         const matched = applyFilters(ds, filters, refs)
         const data = matched.slice(0, limit)

@@ -1,6 +1,6 @@
 import { it, expect } from 'vitest'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { run } from '../../src/cli/program.js'
 import { seededContext, testContext } from '../helpers.js'
@@ -9,6 +9,15 @@ import { fixtureDiff } from '../fixtures/diff.js'
 import type { ZmTransaction } from '../../src/api/types.js'
 
 const zm = async (args: string[], over = {}) => { const t = seededContext(over); const code = await run(['node', 'zm', ...args], t.ctx); return { code, t } }
+
+// Writes owners.yaml into a context's config dir before the command under
+// test runs against it — every owners.yaml CLI test needs the file to exist
+// before `zm` reads it, so this can't reuse the one-shot `zm()` helper above.
+function withOwnersFile(t: ReturnType<typeof seededContext>, yaml: string): void {
+  mkdirSync(t.ctx.paths.configDir, { recursive: true })
+  writeFileSync(join(t.ctx.paths.configDir, 'owners.yaml'), yaml)
+}
+const FAMILY_OWNERS_YAML = 'owners:\n  alex:\n    accounts: ["Card PLN"]\n  sam:\n    accounts: ["acc-partner"]\n'
 
 it('users', async () => {
   const { code, t } = await zm(['users'])
@@ -44,6 +53,90 @@ it('accounts hides archived by default', async () => {
 it('accounts respects --owner', async () => {
   const { t } = await zm(['accounts', '--owner', 'partner'])
   expect(t.json().data.map((a: any) => a.id)).toEqual(['acc-partner'])
+})
+// Once owners.yaml exists, `accounts.owner` reports the file's owner name
+// (or null when unassigned) instead of the ZenMoney login, and --owner
+// switches from ZenMoney-user semantics to name/unassigned/all semantics.
+it('accounts reports owners.yaml owner names once the file exists', async () => {
+  const t = seededContext()
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  expect(await run(['node', 'zm', 'accounts'], t.ctx)).toBe(0)
+  const data = t.json().data
+  expect(data.find((a: any) => a.id === 'acc-pln').owner).toBe('alex')
+  expect(data.find((a: any) => a.id === 'acc-partner').owner).toBe('sam')
+  expect(data.find((a: any) => a.id === 'acc-eur').owner).toBeNull() // unassigned
+})
+it('accounts --owner <name> filters by owners.yaml owner name', async () => {
+  const t = seededContext()
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  expect(await run(['node', 'zm', 'accounts', '--owner', 'alex'], t.ctx)).toBe(0)
+  expect(t.json().data.map((a: any) => a.id)).toEqual(['acc-pln'])
+})
+it('accounts --owner unassigned lists accounts matched by no owner entry', async () => {
+  const t = seededContext()
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  expect(await run(['node', 'zm', 'accounts', '--owner', 'unassigned'], t.ctx)).toBe(0)
+  const ids = t.json().data.map((a: any) => a.id)
+  expect(ids).toContain('acc-eur')
+  expect(ids).not.toContain('acc-pln')
+  expect(ids).not.toContain('acc-partner')
+})
+it('accounts --owner <unknown name> exits 2 with a did-you-mean hint, once owners.yaml exists', async () => {
+  const t = seededContext()
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  const code = await run(['node', 'zm', 'accounts', '--owner', 'ale'], t.ctx)
+  expect(code).toBe(2)
+  expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'unknown owner: ale' })
+  expect(t.errJson().error.hint).toMatch(/alex/)
+})
+// The old ZenMoney-user semantics (me/login/id) stop applying once
+// owners.yaml exists — 'me' isn't a name in FAMILY_OWNERS_YAML, so it's
+// rejected exactly like any other unknown owner name.
+it('accounts --owner me is rejected once owners.yaml exists (old semantics no longer apply)', async () => {
+  const t = seededContext()
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  const code = await run(['node', 'zm', 'accounts', '--owner', 'me'], t.ctx)
+  expect(code).toBe(2)
+  expect(t.errJson().error.code).toBe('INVALID_ARGS')
+})
+it('tx --owner <name> filters transactions by owners.yaml owner name', async () => {
+  const t = seededContext()
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  expect(await run(['node', 'zm', 'tx', '--month', '2026-09', '--owner', 'sam'], t.ctx)).toBe(0)
+  expect(t.json().data.map((x: any) => x.id)).toEqual(['t2'])
+  expect(t.json().data[0].owner).toBe('sam')
+})
+it('zm owners: no file returns an empty owners list, all non-archived accounts unassigned, and a hint warning', async () => {
+  const { t } = await zm(['owners'])
+  expect(t.json().data.owners).toEqual([])
+  expect(t.json().data.file).toBeNull()
+  const unassignedIds = t.json().data.unassigned.map((a: any) => a.id)
+  expect(unassignedIds).toContain('acc-pln')
+  expect(unassignedIds).not.toContain('acc-old') // archived, excluded by default
+  expect(t.json().warnings[0]).toMatch(/owners\.yaml/)
+})
+it('zm owners: lists each owner\'s matched accounts and unassigned accounts, from the file', async () => {
+  const t = seededContext()
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  expect(await run(['node', 'zm', 'owners'], t.ctx)).toBe(0)
+  const data = t.json().data
+  expect(data.file).toBe(join(t.ctx.paths.configDir, 'owners.yaml'))
+  expect(data.owners).toEqual([
+    { name: 'alex', accounts: [{ id: 'acc-pln', title: 'Card PLN' }] },
+    { name: 'sam', accounts: [{ id: 'acc-partner', title: 'Card Partner' }] },
+  ])
+  expect(data.unassigned.map((a: any) => a.id).sort()).toEqual(['acc-debt', 'acc-eur'])
+})
+it('zm owners --archived includes archived accounts in unassigned', async () => {
+  const t = seededContext()
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  expect(await run(['node', 'zm', 'owners', '--archived'], t.ctx)).toBe(0)
+  expect(t.json().data.unassigned.map((a: any) => a.id)).toContain('acc-old')
+})
+it('zm owners rejects a non-all --owner', async () => {
+  const { code, t } = await zm(['owners', '--owner', 'me'])
+  expect(code).toBe(2)
+  expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: '--owner is not supported by owners' })
 })
 it('categories flat and tree', async () => {
   const flat = (await zm(['categories'])).t.json().data

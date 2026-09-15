@@ -1,7 +1,7 @@
 import { it, expect } from 'vitest'
 import { writeFileSync, readFileSync, mkdirSync, statSync, existsSync, chmodSync, readdirSync, rmSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { run } from '../../src/cli/program.js'
 import { testContext, seededContext } from '../helpers.js'
@@ -17,7 +17,15 @@ it('works with no token and no cache at all', async () => {
   expect(data.token).toEqual({ source: null })
   expect(data.configDir).toBe(t.ctx.paths.configDir)
   expect(data.budgetDir).toBe(t.ctx.paths.budgetDir)
+  expect(data.ownersFile).toEqual({ path: join(t.ctx.paths.configDir, 'owners.yaml'), exists: false })
   expect(data.version).toMatch(/^\d+\.\d+\.\d+$/)
+})
+it('reports ownersFile.exists: true once owners.yaml has been created', async () => {
+  const t = testContext()
+  mkdirSync(t.ctx.paths.configDir, { recursive: true })
+  writeFileSync(join(t.ctx.paths.configDir, 'owners.yaml'), 'owners:\n  alex:\n    accounts: [a]\n')
+  expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
+  expect(t.json().data.ownersFile).toEqual({ path: join(t.ctx.paths.configDir, 'owners.yaml'), exists: true })
 })
 it('never calls the network', async () => {
   const t = testContext({

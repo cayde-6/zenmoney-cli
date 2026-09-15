@@ -4,6 +4,7 @@ import { addFilterOptions, readFilters, withStore } from '../program.js'
 import { flattenGroups } from '../output.js'
 import { loadDataset } from '../../query/model.js'
 import { applyFilters, currencyWarnings, resolveFilterRefs, resolvePeriod } from '../../query/filters.js'
+import { loadOwnersFile } from '../../query/owners.js'
 import { spendBy, incomeBy, type SpendBy } from '../../analytics/spend.js'
 import { compare, parsePeriod } from '../../analytics/compare.js'
 import { findRecurring, recurringWindow } from '../../analytics/recurring.js'
@@ -32,7 +33,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
       const period = resolvePeriod(filters)
 
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store)
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
         const refs = resolveFilterRefs(ds, filters)
         const txs = applyFilters(ds, filters, refs)
         const data = spendBy(txs, opts.by as SpendBy, { tree: opts.tree, tags: ds.tags })
@@ -61,7 +62,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
       const period = resolvePeriod(filters)
 
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store)
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
         const refs = resolveFilterRefs(ds, filters)
         const txs = applyFilters(ds, filters, refs)
         const data = incomeBy(txs, opts.by as 'category' | 'month')
@@ -96,7 +97,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
       const filters = readFilters(cmd)
 
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store)
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
         const refs = resolveFilterRefs(ds, filters)
         const periodTxs = applyFilters(ds, { ...filters, ...periodRange }, refs)
         const vsTxs = applyFilters(ds, { ...filters, ...vsRange }, refs)
@@ -135,7 +136,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
       const filters = readFilters(cmd)
 
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store)
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
         const refs = resolveFilterRefs(ds, filters)
         const txs = applyFilters(ds, filters, refs)
         const now = ctx.now()

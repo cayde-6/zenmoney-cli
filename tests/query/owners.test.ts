@@ -95,6 +95,11 @@ it('matchOwners: matches by case-insensitive, trimmed title substring', () => {
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["card alex"]\n', 'owners.yaml')
   expect([...matchOwners(accounts, file)]).toEqual([['acc-1', 'alex']])
 })
+it('matchOwners: a blank (whitespace-only) entry matches nothing, rather than every account', () => {
+  const accounts = new Map([['acc-1', account('acc-1', 'Some Card')]])
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["   "]\n', 'owners.yaml')
+  expect(matchOwners(accounts, file).size).toBe(0)
+})
 it('matchOwners: an account matched by no entry is left out (unassigned)', () => {
   const accounts = new Map([['acc-1', account('acc-1', 'Nothing Matches')]])
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card Alex"]\n', 'owners.yaml')
