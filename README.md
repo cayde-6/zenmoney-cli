@@ -98,13 +98,12 @@ exists, whether it's readable (plus an `error` message when it isn't),
 `lastSyncAt`/`ageHours`, where a token would be found (`env` | `keychain` |
 `config` | `null` — never the token value itself), `configDir`, `budgetDir`,
 and the installed version. It makes no network call, works with no token
-and no cache at all, and never modifies the database's own contents: it
-prefers a mode that touches no files at all, only falling back to a plain
-read-only open when there's real unsynced data it would otherwise miss —
-that fallback may, in this rare case, leave `-wal`/`-shm` sidecar files
-next to the cache (they're never deleted, to avoid corrupting another
-process, e.g. a concurrent `zm sync`, that starts relying on them). So it's
-always safe to run first when something else isn't working.
+and no cache at all, and never writes to the real cache file or its
+directory: it copies the cache (and its `-wal` file, if present) into a
+private temp directory, reads that copy, and removes the temp directory
+again — so any data a `zm sync` has committed but not yet checkpointed is
+included, and the real cache is only ever read from, never modified. So
+it's always safe to run first when something else isn't working.
 
 A few example commands, with real output shape (from a small neutral
 account: two users `owner`/`partner`, currencies PLN/EUR, categories like

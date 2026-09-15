@@ -74,11 +74,11 @@ Initial release of `@cayde-6/zenmoney-cli`.
   `lastSyncAt`/`ageHours`, where a token would be found
   (`env`/`keychain`/`config`/`null`, never the token itself), `configDir`,
   `budgetDir`, and the installed version. Makes no network call, works
-  without a token or a cache, and reads the cache without intentionally
-  modifying it: it prefers a mode that touches no files at all, falling
-  back to a plain read-only open (which can briefly need to create, then
-  removes, a `-wal`/`-shm` sidecar file) only when there's real unsynced
-  data it would otherwise miss.
+  without a token or a cache, and reads the cache without ever writing to
+  the real cache file or its directory: it copies the cache (and its `-wal`
+  file, if present) into a private temp directory, reads that copy —
+  including any data committed but not yet checkpointed — and removes the
+  temp directory again afterwards.
 
 ### Documentation
 

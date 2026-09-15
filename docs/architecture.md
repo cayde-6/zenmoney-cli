@@ -131,36 +131,29 @@ above constraints: it never opens a network connection, never requires a
 token, and never touches `Store` at all — it never intentionally mutates
 the cache, but "read-only" for a WAL-mode SQLite database is nuanced enough
 that this needs stating precisely rather than as a blanket "never creates
-files". It tries two approaches, in order:
+files".
 
-1. A URI filename (`file:<path>?mode=ro&immutable=1`, still passing
-   `{ readOnly: true }`) reads the database without creating any `-wal`/
-   `-shm` sidecar file at all — a plain read-only `DatabaseSync` on a
-   WAL-mode database still needs to create `-shm` (the shared-memory WAL
-   index) just to read consistently, even though it never writes to the
-   database itself; `immutable` skips that machinery entirely, which also
-   means a directory that isn't writable (so a normal connection couldn't
-   create `-shm` there, failing with `SQLITE_READONLY_CANTINIT`) is no
-   obstacle. The cost: an immutable connection never looks at `-wal`, so any
-   not-yet-checkpointed data in it is invisible. Only attempted when `-wal`
-   doesn't exist at all — a cleanly-closed cache never has one, so this
-   covers the common case; existence, not merely a non-empty file, is what
-   gates it, since a connection actively writing under
-   `PRAGMA locking_mode=EXCLUSIVE` can leave `-wal` at 0 bytes for the
-   whole span of a transaction.
-2. Otherwise (a `-wal` file exists, or the URI approach itself didn't pan
-   out), a plain read-only open — this sees WAL data correctly and
-   participates in normal SQLite locking (a `PRAGMA busy_timeout` is set so
-   a transient lock, e.g. a concurrent `zm sync` mid-write, is waited out
-   rather than immediately reported as unreadable), but can need to create
-   `-wal`/`-shm` as a side effect of opening. Unlike an earlier version of
-   this code, any such sidecar file is deliberately left in place afterwards
-   rather than deleted: another process (e.g. a concurrent `zm sync`) could
-   start relying on that same sidecar the instant this connection closes,
-   and deleting it out from under that process risks corrupting its view of
-   the database. So `zm status`, in this rare fallback case, may leave
-   `-wal`/`-shm` sidecar files behind next to the cache — it never modifies
-   the database's own contents either way.
+An earlier version tried a `file:<path>?mode=ro&immutable=1` URI filename
+first, since that reads the database without creating any `-wal`/`-shm`
+sidecar file at all — but `node:sqlite`'s support for URI filenames turned
+out to vary by Node version (confirmed broken on 22.13.0, working on 22
+latest and 24), which made the whole cache-diagnostic command behave
+differently depending on the exact Node patch version it ran on. `zm status`
+now instead copies the cache file into a private temp directory
+(`mkdtempSync`), copies the `-wal` file alongside it too if one exists
+(never `-shm` — it's just a shared-memory index SQLite rebuilds from `-wal`
+the moment it opens a file, meaningless outside the process that mapped it),
+and opens that copy with a normal (non-read-only) `DatabaseSync`. Opening
+the copy normally, rather than read-only, lets SQLite replay `-wal` into it,
+so data a writer has committed but not yet checkpointed is included — an
+in-flight, uncommitted transaction at the exact moment of the copy has no
+valid commit frame in the copied `-wal` and is simply ignored on open, same
+as for any other reader. The temp directory is removed (`rmSync`) in a
+`finally` once the read is done, whether it succeeded or not. This makes
+the real cache file and its directory read-only inputs to `zm status` in
+the literal sense: they're opened only via `copyFileSync`, never by
+`DatabaseSync`, so nothing next to the cache is ever created, modified, or
+left behind, on any supported Node version.
 
 Either way, a missing/corrupted/permission-denied file is reported via
 `{ path, exists, readable, lastSyncAt, ageHours, error? }` rather than
