@@ -22,18 +22,34 @@ Initial release of `@cayde-6/zenmoney-cli`.
   category (parent includes subcategories), account, currency, owner,
   `--type`, `--search`, and `--limit` filters.
 - **Owners config**: an optional `<configDir>/owners.yaml` maps owner
-  names to accounts (by id or a case-insensitive title substring) for
-  families whose ZenMoney data has no per-account ownership (every
-  account/transaction/tag/merchant carrying the same `user`). Once it
-  exists, `--owner` switches from ZenMoney-user semantics (`me|<id>|<login>`)
-  to `all`|`unassigned`|a file owner name everywhere except `zm users`
-  (which has no natural mapping onto file owner names); `tx` gains an
+  names (must start with a letter, `[A-Za-z][A-Za-z0-9._-]*`, a genuine
+  yaml string key) to accounts, by id or by title, for families whose
+  ZenMoney data has no per-account ownership (every
+  account/transaction/tag/merchant carrying the same `user`). A title entry
+  with letters/digits is a case-insensitive substring match; a bare
+  emoji/symbol entry instead has to align to a whole Unicode grapheme
+  cluster in the title (so a bare emoji never matches a fragment of a
+  larger ZWJ/skin-tone sequence), normalizing NFC and stripping variation
+  selectors first. An exact account-id entry wins over another owner's
+  title match; a genuine conflict is a hard error naming the account and
+  every matching owner, except on an archived account, where it's a
+  warning (account treated as unassigned) instead of failing the command.
+  Once the file exists, `--owner` switches from ZenMoney-user semantics
+  (`me|<id>|<login>`) to `all`|`unassigned`|a file owner name (matched
+  case-insensitively) everywhere except `zm users`, which rejects any
+  non-`all` value outright once the file is active (no natural mapping
+  onto file owner names) with a hint pointing to `zm owners`; an unknown
+  name's hint lists every defined name plus the file's path. `tx` gains an
   `owner` field alongside the existing `ownerId`; `zm accounts`' `owner`
   field reports the file's owner name instead of the ZenMoney login; and
   the new `zm owners` command (no network) reports the file's own
-  `{ name, accounts }` mapping plus which accounts are unassigned. `zm
-  status` reports `ownersFile: { path, exists }`. With no `owners.yaml`,
-  every command behaves exactly as before.
+  `{ name, accounts }` mapping plus which accounts are unassigned,
+  `--format table` as `{ owner, id, title }` rows, and warns about an entry
+  matching zero accounts or more than half of all accounts. `zm status`
+  reports `ownersFile: { path, exists, valid, error? }`, parsed
+  independently of the cache. A directory or otherwise unreadable
+  owners.yaml is a clear `INVALID_ARGS` naming the path. With no
+  `owners.yaml`, every command behaves exactly as before.
 - **Analytics**: `zm spend` (by category/month/merchant, with `--tree`),
   `zm income` (by category/month), `zm compare` (two periods, by total or
   category), `zm recurring` (subscription/recurring-payment detection).

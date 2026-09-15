@@ -128,28 +128,89 @@ which ZenMoney's data model has no field for.
 
 **`<configDir>/owners.yaml`** (optional) fixes this locally, without
 ZenMoney's cooperation: it maps owner names to accounts, by account id or a
-case-insensitive substring of the account title (see `query/owners.ts`).
-`query/model.ts`'s `loadDataset` resolves this once per Dataset
-(`matchOwners`), exposing it as `Dataset.ownerNames`/`Dataset.ownerOf` and a
-new `Tx.owner` field (the owning account's owner name, or `null` when
-unassigned) — independent of the existing `ownerId`, which is always the
-ZenMoney user id regardless of `owners.yaml`. Two different owners' entries
-matching the same account is a configuration error (`INVALID_ARGS`, naming
-the account and both owners) rather than a silent, arbitrary pick.
+title match (see `query/owners.ts`). `query/model.ts`'s `loadDataset`
+resolves this once per Dataset (`matchOwners`), exposing it as
+`Dataset.ownerNames`/`Dataset.ownerOf`/`Dataset.ownersPath`/
+`Dataset.ownerWarnings` and a new `Tx.owner` field (the owning account's
+owner name, or `null` when unassigned) — independent of the existing
+`ownerId`, which is always the ZenMoney user id regardless of
+`owners.yaml`. An owner name must start with a letter and match
+`[A-Za-z][A-Za-z0-9._-]*` (so it always works as a bare `--owner <name>`
+argument), can't be `all`/`unassigned` (reserved) or
+`__proto__`/`constructor`/`prototype`, and must be a genuine yaml string
+key — `parseOwnersFile` walks the parsed `Document`'s own key nodes (not
+just the plain-JS-object result) to reject a bare numeric/boolean/null key
+that `yaml`'s core schema would otherwise silently resolve to a non-string
+type before it ever reaches a JS object property.
+
+**Title matching has two modes** (`entryMatchesAccount`): an entry
+containing at least one Unicode letter or digit is a plain
+case-insensitive, trimmed substring match, same as `--account`/
+`--category`. An entry with *no* letters or digits at all (a bare
+emoji/symbol) instead has to align to whole Unicode grapheme-cluster
+boundaries in the title, using `Intl.Segmenter('grapheme')` — a plain
+code-point substring match would happily match a fragment of a larger
+cluster, e.g. the bare base emoji "👨" inside a "👨‍👩" (man+ZWJ+woman)
+family cluster, or a skin-toned emoji's bare base emoji inside its own
+full modifier+ZWJ sequence. Both sides are NFC-normalized and stripped of
+every U+FE0F (variation selector-16, cosmetic and commonly appended by
+emoji keyboards) before either kind of comparison, so a title/entry
+differing only by that invisible selector still matches. There's no way to
+"partially" match a bare-emoji entry — the intended UX is that a user
+copies the exact emoji straight out of `zm owners`' own account titles.
+
+**Conflict precedence and archived accounts.** An exact account-id entry
+always wins over a different owner's mere title match for the same account
+— an id is unambiguous by construction, so there's nothing to arbitrate.
+A genuine conflict (two or more owners both matching by id, or none of them
+by id) on a non-archived account is a configuration error (`INVALID_ARGS`,
+naming the account and every matching owner, hinting to pin it by account
+id) rather than a silent, arbitrary pick — but on an *archived* account
+it's downgraded to an entry in `Dataset.ownerWarnings` and the account is
+treated as unassigned instead, so a stale closed account's leftover title
+overlap can never break every other command that opens the cache. Matching
+itself always considers every account, archived included; `--archived`
+only ever changes what a command *displays*. Every command that opens a
+Dataset merges `ownerWarnings` into its own `warnings` output.
 
 Once `owners.yaml` exists, `--owner` (`query/filters.ts`'s
 `resolveOwnerName`) switches wholesale from the ZenMoney-user semantics
 above to `all` (default) | `unassigned` | one of the file's own owner
-names, filtering on `Tx.owner` instead of `Tx.ownerId`; an unrecognized name
-gets the same did-you-mean hint as an unknown category/account. With no
-`owners.yaml` at all, every command behaves exactly as before this feature
-(`resolveOwner`, `Tx.ownerId`-based). `zm users` is deliberately exempt: it
-lists ZenMoney's own users, which have no natural mapping onto
-per-account owner names, so it keeps the old me/login/id semantics
-unconditionally. `zm owners` (reads the cache and the file, no network)
-reports the file's own `{ name, accounts }` mapping plus which accounts are
-unassigned, and is the first thing an agent should run once `owners.yaml`
-might exist.
+names, filtering on `Tx.owner` instead of `Tx.ownerId`, matched
+case-insensitively but always resolving to the file's own spelling (so a
+downstream `owner`/`meta.owner` field never echoes the caller's casing).
+An unrecognized name's hint lists every defined owner name outright (not a
+fuzzy top-3 guess, unlike category/account) plus the file's own path —
+useful on its own as a reminder of what's in the file, without a separate
+`zm owners` round-trip. With no `owners.yaml` at all, every command behaves
+exactly as before this feature (`resolveOwner`, `Tx.ownerId`-based). `zm
+users` is deliberately exempt from the *name* semantics — it lists
+ZenMoney's own users, which have no natural mapping onto per-account owner
+names — but once `owners.yaml` exists it also rejects any non-`all` value
+outright (same `rejectOwner` pattern as `categories`/`rates`, with a hint
+pointing to `zm owners`), rather than silently keep applying the old
+me/login/id semantics as if nothing had changed.
+
+`zm owners` (reads the cache and the file, no network) reports the file's
+own `{ name, accounts }` mapping plus which accounts are unassigned, and is
+the first thing an agent should run once `owners.yaml` might exist.
+`--format table` renders one `{ owner, id, title }` row per account (a
+literal `(unassigned)` owner for accounts nothing matched), via the normal
+table mechanism (`flattenOwnersTable`) rather than falling back to a raw
+JSON dump. It also adds two entry-quality warnings, over every account
+(archived included): an entry matching zero accounts (almost always a typo
+or a renamed/closed account) and an entry matching more than half of all
+accounts (`entry "x" of owner y matches N of M accounts` — probably
+broader than intended).
+
+Both `owners.yaml` itself and its path deserve the same care as the cache:
+a directory (or otherwise unreadable file, e.g. a permission problem) at
+that path is a hard `INVALID_ARGS` naming the path, not an unhandled fs
+exception — `loadOwnersFile` wraps `readFileSync` explicitly for this.
+`zm status` parses the file independently of the cache (which might not
+even exist) and reports `ownersFile: { path, exists, valid, error? }`, so a
+broken `owners.yaml` is visible from the one command that's guaranteed to
+run.
 
 ## Caching and stale warning
 
@@ -455,4 +516,15 @@ months, and never suggesting a limit `<= 0`.
   owners' entries matching the same account) errors out rather than
   picking one arbitrarily, for the same reason as the duplicate budget
   limit key above: a silent pick would misattribute real spend without any
-  visible sign that it happened.
+  visible sign that it happened — except on an archived account, where
+  that would break every other command over a closed account nobody's
+  actively tracking anymore, so it's downgraded to a warning instead.
+- **Emoji entries match whole grapheme clusters, never substrings of one.**
+  A plain code-point substring check (as used for text entries) would
+  happily match a bare emoji inside a larger ZWJ/skin-tone sequence that
+  visually reads as one character but is several code points — silently
+  matching something the file's author never intended to write. Requiring
+  whole-grapheme alignment (`Intl.Segmenter`) means an emoji entry either
+  matches exactly what a user would see and copy from `zm owners`, or
+  doesn't match at all; there's no plausible partial-match interpretation
+  worth guessing at instead.

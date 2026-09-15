@@ -45,13 +45,26 @@ those is available.
   owners` first** (reads the cache and the optional
   `~/.config/zm/owners.yaml`, no network). If `data.file` is non-null,
   `--owner` takes `all` (default), `unassigned`, or one of `data.owners[].name`
-  — not a ZenMoney login or id. If `data.file` is `null` (no `owners.yaml`),
+  (matched case-insensitively) — not a ZenMoney login or id, and not on
+  `zm users` (see below). If `data.file` is `null` (no `owners.yaml`),
   `--owner` instead takes ZenMoney-user semantics: `me` (the main user of
   the family account, i.e. the user with no parent — not necessarily
   whoever's API token this CLI is using), `all`, a numeric user id, or a
   login (see `zm users`). Don't guess which mode applies — `zm owners`
   tells you directly, and an unrecognized `--owner` value exits 2 with a
-  did-you-mean hint either way.
+  hint listing every defined owner name (not a fuzzy guess) once
+  `owners.yaml` exists.
+- If `zm owners`' `data.owners[].accounts[].title` contains an emoji, and
+  you need to write an `owners.yaml` entry that matches it, **copy the
+  emoji exactly from that title** rather than retyping it — a bare emoji
+  only matches a title's whole grapheme cluster (e.g. a skin-toned emoji or
+  a ZWJ family sequence), never a fragment of one. `zm owners`' `warnings`
+  flag an entry that ends up matching zero accounts, so a mistyped one
+  is never silently a no-op.
+- A `zm owners` (or any owner-filtered command's) conflict — two owners'
+  entries both matching the same account — exits 2 (`INVALID_ARGS`) unless
+  the account is archived, in which case it's a `warnings` entry and the
+  account is treated as unassigned instead of failing the command.
 - **Never add amounts in different currencies.** All sums and aggregates are
   reported per currency, on purpose — a total across currencies is not a
   correct number. If the user needs one total, run `zm rates`, convert
@@ -86,7 +99,9 @@ every other command accepts it, though it only has an effect on `users`,
 `accounts`, `tx`, `spend`, `income`, `compare`, `recurring`, `budget
 status`, and `budget suggest` (`auth`, `sync`, `status`, and `budget init`
 accept it but it has no effect on any of them). `users` always keeps
-ZenMoney-user semantics for `--owner`, even when `owners.yaml` exists.
+ZenMoney-user semantics for `--owner`, but once `owners.yaml` exists it
+*also* rejects any non-`all` value outright (exit 2, hint pointing to `zm
+owners`) rather than silently keep applying `me`/login/id semantics.
 Beyond `--format`, flags differ by command — they are not uniform across
 "filtering commands":
 
@@ -108,10 +123,10 @@ Run `zm <command> --help` for the exact flags and examples of any command.
 |---|---|---|
 | `zm auth` | `--token`, `--logout` | `{ saved: "keychain"\|"config" }` or `{ removed: true }` — if a Keychain was available but the write to it failed, `saved` is `"config"` and a `warnings` entry says so |
 | `zm sync` | `--full` | `{ upserted, deleted, full }` — `upserted` is a per-entity map of counts (e.g. `{ transaction: 12 }`), `deleted` is one total count across all entities, `full` mirrors `--full` |
-| `zm status` | – | `{ cache: { path, exists, readable, lastSyncAt, ageHours, error? }, token: { source: "env"\|"keychain"\|"config"\|null }, configDir, budgetDir, version }` — no network call, works with no token and no cache, never writes to the real cache file or its directory (reads a private temp copy instead, including any uncheckpointed WAL data; a copy torn by a concurrent write is retried a few times before `readable: false`), never prints the token itself, only its `source` |
+| `zm status` | – | `{ cache: { path, exists, readable, lastSyncAt, ageHours, error? }, token: { source: "env"\|"keychain"\|"config"\|null }, configDir, budgetDir, ownersFile: { path, exists, valid, error? }, version }` — no network call, works with no token and no cache, never writes to the real cache file or its directory (reads a private temp copy instead, including any uncheckpointed WAL data; a copy torn by a concurrent write is retried a few times before `readable: false`), never prints the token itself, only its `source`; `ownersFile.valid` is `false` (with an `error`) for a broken/unreadable owners.yaml, checked independent of the cache |
 | `zm users` | – | `[{ id, login, currency, isMain }]` |
 | `zm accounts` | `--archived` | `[{ id, title, type, currency, balance, inBalance, archived, owner }]` — `owner` is the `owners.yaml` owner name (or `null` if unassigned) once that file exists, else the ZenMoney login |
-| `zm owners` | `--archived` | `{ file: path\|null, owners: [{ name, accounts: [{ id, title }] }], unassigned: [{ id, title }] }` — reads the cache and `owners.yaml`, no network; run this first before using `--owner` by name (see "Rules for agents" above) |
+| `zm owners` | `--archived` | `{ file: path\|null, owners: [{ name, accounts: [{ id, title }] }], unassigned: [{ id, title }] }` — reads the cache and `owners.yaml`, no network; run this first before using `--owner` by name (see "Rules for agents" above); `--format table` renders `{ owner, id, title }` rows, `(unassigned)` for unassigned accounts; `warnings` flag an entry matching zero accounts, an entry matching more than half of all accounts, and an archived-account conflict resolved as unassigned |
 | `zm categories` | `--tree` | `[{ id, path, parentId, kind }]`, or nested `{ ...,children: [...] }` with `--tree` |
 | `zm rates` | – | `[{ currency, rate }]` relative to the main user's currency; `meta.note` marks it as current, not historical |
 | `zm tx` | `--from/--to/--month`, `--category/--account/--currency`, `--type`, `--search`, `--limit` (default 100) | `[{ id, date, type, amount, currency, categoryPath, merchant, payee, accountTitle, hold, originalPayee, ownerId, owner, ... }]` — `hold` (boolean) marks a not-yet-settled ZenMoney transaction, counted normally; `owner` is the `owners.yaml` owner name (`null` with no file or when unassigned), independent of `ownerId` (always the raw ZenMoney user id); `meta.total`/`meta.returned` say whether the list was cut off |

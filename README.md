@@ -277,10 +277,15 @@ commands":
   no-op. Elsewhere, `--owner` only has an effect on `users`, `accounts`,
   `tx`, `spend`, `income`, `compare`, `recurring`, `budget status`, and
   `budget suggest` — `auth`, `sync`, `status`, and `budget init` accept the
-  flag but it has no effect on any of them. `users` is always filtered by
-  ZenMoney-user semantics (`me|all|<id>|<login>`), even when `owners.yaml`
-  exists — a file owner name has no natural mapping onto ZenMoney's own
-  user list.
+  flag but it has no effect on any of them.
+- `users` is always filtered by ZenMoney-user semantics
+  (`me|all|<id>|<login>`), never by `owners.yaml` names — but once
+  `owners.yaml` exists, it *also* rejects any non-`all` value outright
+  (exit 2, hint pointing to `zm owners`), the same way `categories`/`rates`
+  always do, rather than silently keep applying `me`/login/id semantics as
+  if nothing had changed. A file owner name has no natural mapping onto
+  ZenMoney's own (usually one or two row) user list — that mismatch is
+  exactly why `owners.yaml` exists for accounts/tx in the first place.
 
 ## Owners
 
@@ -305,20 +310,44 @@ owners:
 ```
 
 Each `accounts` entry matches an account if it equals the account id
-exactly, or is a case-insensitive substring of the account title (after
-trimming) — entries may contain any Unicode, including emoji; only the
-owner *name* itself is restricted to `[A-Za-z0-9._-]` and can't be `all` or
-`unassigned` (both are reserved `--owner` values once the file exists). An
-account matched by entries from two different owners is a hard error
-(`INVALID_ARGS`, naming the account and both owners) rather than a silent
-pick; an account matched by no entry at all is "unassigned".
+exactly, or matches the account title (after trimming). Title matching has
+two modes: an entry containing at least one letter or digit is a plain
+case-insensitive substring match; a *bare emoji/symbol* entry (no letters
+or digits at all) instead has to align to whole Unicode grapheme-cluster
+boundaries in the title — so a bare "👨" does **not** match inside a
+"👨‍👩 Joint" title (that's one grapheme, a ZWJ-joined family), and a
+skin-toned emoji only matches by its full sequence, never by its bare base
+emoji. **Copy the emoji straight from the account title** (as `zm owners`
+prints it) rather than retyping it — matching is otherwise exact once
+variation selectors are stripped and both sides are Unicode-normalized.
+Only the owner *name* itself is restricted to `[A-Za-z][A-Za-z0-9._-]*`
+(must start with a letter) and can't be `all` or `unassigned` (both are
+reserved `--owner` values once the file exists); it must also be written
+as a real yaml string key (a bare numeric key like `123:` is rejected, not
+silently stringified).
+
+An account matched by entries from two different owners is a hard error
+(`INVALID_ARGS`, naming the account and every matching owner, with a hint
+to pin it to one owner by account id) — *unless* the account is archived,
+in which case the conflict is downgraded to a `warnings` entry and the
+account is treated as unassigned, so one stale closed account can never
+break every other command that opens the cache. An exact account-id entry
+always wins over another owner's mere title match (no conflict in that
+case). An account matched by no entry at all is "unassigned". Matching
+itself always considers every account, archived included — `--archived`
+only ever changes what a command *displays*.
 
 Once `owners.yaml` exists:
 
 - `--owner` switches from ZenMoney-user semantics to `all` (default) |
-  `unassigned` | one of the file's own owner names — see "Global options &
-  filters" above. An unrecognized name exits 2 with a did-you-mean hint,
-  same as an unknown `--category`/`--account`.
+  `unassigned` | one of the file's own owner names, compared
+  case-insensitively but always resolving to the file's own spelling — see
+  "Global options & filters" above. An unrecognized name exits 2 with a
+  hint listing every defined owner name (and the file's path) rather than
+  a fuzzy top-3 guess. `zm users` is the one exception: it keeps ZenMoney-
+  user semantics for everything *except* rejects any non-`all` value with a
+  pointer to `zm owners`, since a family-member owner name has no natural
+  mapping onto ZenMoney's own user list.
 - Every `tx` row gains an `owner` field (the owning account's owner name,
   or `null` when unassigned) alongside the existing `ownerId` (always the
   raw ZenMoney user id, regardless of `owners.yaml`).
@@ -326,12 +355,15 @@ Once `owners.yaml` exists:
   when unassigned) instead of the ZenMoney login.
 - `budget status`, `budget suggest`, `spend`, `income`, `compare`,
   `recurring`, and `tx` all filter by the new `--owner` semantics through
-  the shared filter path.
+  the shared filter path, and surface any archived-account conflict
+  warning in their own `warnings`.
 
 With no `owners.yaml` at all, every command behaves exactly as before this
 feature — `--owner` keeps its `me|all|<id>|<login>` semantics, `tx.owner`
 is always `null`, and `zm accounts`' `owner` field stays the ZenMoney
-login.
+login. A directory (or otherwise unreadable file) at `owners.yaml`'s path,
+or invalid yaml/shape, is a hard `INVALID_ARGS` error naming the path —
+never a silent fallback to "no file".
 
 **`zm owners`** (reads the local cache and `owners.yaml`, no network — run
 this first to see the current mapping):
@@ -349,14 +381,21 @@ $ zm owners
       { "name": "sam", "accounts": [{ "id": "acc-id-456", "title": "Sam" }] }
     ],
     "unassigned": [{ "id": "acc-id-789", "title": "Joint Savings" }]
-  }
+  },
+  "meta": { "lastSyncAt": "2026-09-20T12:00:00.000Z" }
 }
 ```
 
 With no `owners.yaml`, `data.file` is `null`, `data.owners` is `[]`, every
 non-archived account is listed under `data.unassigned`, and a `warnings`
 entry explains how to create the file. `--archived` includes archived
-accounts in both `owners[].accounts` and `unassigned`.
+accounts in both `owners[].accounts` and `unassigned`. `--format table`
+renders one `{ owner, id, title }` row per account, with a literal
+`(unassigned)` `owner` for accounts nothing matched. Two more kinds of
+`warnings` help catch a stale or overly-broad `owners.yaml`: an entry that
+matches zero accounts (a likely typo, or a renamed/closed account), and an
+entry that matches more than half of *all* accounts (`entry "x" of owner y
+matches N of M accounts` — likely broader than intended).
 
 ## Budget files
 
