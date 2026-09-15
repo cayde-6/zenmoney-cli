@@ -12,7 +12,7 @@ const WINDOW = { from: '2026-06', to: '2026-08' }
 function tx(over: Partial<Tx>): Tx {
   return {
     id: 'x', date: '2026-06-01', type: 'expense', amount: 10, currency: 'EUR',
-    accountId: 'a', accountTitle: 'a', ownerId: 1, categoryId: 'c', topCategoryId: 'c',
+    accountId: 'a', accountTitle: 'a', ownerId: 1, owner: null, categoryId: 'c', topCategoryId: 'c',
     categoryPath: 'Taxi', merchant: null, payee: null, comment: null, hold: false, originalPayee: null, ...over,
   }
 }

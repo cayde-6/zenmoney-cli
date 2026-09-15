@@ -11,7 +11,7 @@ const ids = (f: any) => applyFilters(ds, f).map(t => t.id).sort()
 // to exercise exact-vs-substring priority; the fixture's account titles don't
 // happen to overlap that way.
 function accountDataset(accounts: ZmAccount[]): Dataset {
-  return { users: ds.users, accounts: new Map(accounts.map(a => [a.id, a])), tags: ds.tags, instruments: ds.instruments, txs: [] }
+  return { users: ds.users, accounts: new Map(accounts.map(a => [a.id, a])), tags: ds.tags, instruments: ds.instruments, txs: [], ownerNames: null, ownerOf: new Map() }
 }
 function account(id: string, title: string): ZmAccount {
   return { id, user: 10, instrument: 100, type: 'cash', title, balance: 0, inBalance: true, archive: false, changed: 0 }
@@ -39,7 +39,7 @@ it('category includes children and matches by leaf title', () => {
 it('resolveCategory: duplicate full-path match is ambiguous', () => {
   const dupTags = new Map(ds.tags)
   dupTags.set('food2', { id: 'food2', user: 10, title: 'Groceries', parent: null, showIncome: false, showOutcome: true, changed: 0 })
-  const dupDs: Dataset = { users: ds.users, accounts: ds.accounts, tags: dupTags, instruments: ds.instruments, txs: [] }
+  const dupDs: Dataset = { users: ds.users, accounts: ds.accounts, tags: dupTags, instruments: ds.instruments, txs: [], ownerNames: null, ownerOf: new Map() }
   try { resolveCategory(dupDs, 'Groceries'); throw new Error('no throw') }
   catch (e: any) {
     expect(e.code).toBe('INVALID_ARGS')

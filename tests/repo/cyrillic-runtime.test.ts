@@ -32,7 +32,7 @@ function tag(id: string, title: string): ZmTag {
 function tx(over: Partial<Tx>): Tx {
   return {
     id: 'x', date: '2026-09-01', type: 'expense', amount: 10, currency: 'EUR',
-    accountId: 'a', accountTitle: 'a', ownerId: 1, categoryId: null, topCategoryId: null,
+    accountId: 'a', accountTitle: 'a', ownerId: 1, owner: null, categoryId: null, topCategoryId: null,
     categoryPath: '', merchant: null, payee: null, comment: null, hold: false, originalPayee: null, ...over,
   }
 }
@@ -42,7 +42,7 @@ function dataset(): Dataset {
     ['ru', tag('ru', cyrillicTitle)],
     ['en', tag('en', 'Apples')],
   ])
-  return { users: [], accounts: new Map(), tags, instruments: new Map(), txs: [] }
+  return { users: [], accounts: new Map(), tags, instruments: new Map(), txs: [], ownerNames: null, ownerOf: new Map() }
 }
 
 it('resolves a Cyrillic category by exact title, case-insensitively', () => {

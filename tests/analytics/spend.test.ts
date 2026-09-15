@@ -14,7 +14,7 @@ const sept = applyFilters(ds, { month: '2026-09' })
 function tx(over: Partial<Tx>): Tx {
   return {
     id: 'x', date: '2026-09-01', type: 'expense', amount: 10, currency: 'EUR',
-    accountId: 'a', accountTitle: 'a', ownerId: 1, categoryId: 'h1', topCategoryId: 'h1',
+    accountId: 'a', accountTitle: 'a', ownerId: 1, owner: null, categoryId: 'h1', topCategoryId: 'h1',
     categoryPath: 'Health', merchant: null, payee: null, comment: null, hold: false, originalPayee: null, ...over,
   }
 }

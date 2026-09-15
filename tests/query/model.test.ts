@@ -1,5 +1,6 @@
 import { it, expect } from 'vitest'
 import { loadDataset, meUser, merchantLabel, type Dataset, type Tx } from '../../src/query/model.js'
+import { parseOwnersFile } from '../../src/query/owners.js'
 import { fixtureStore } from '../helpers.js'
 import { Store } from '../../src/store/store.js'
 import { fixtureDiff } from '../fixtures/diff.js'
@@ -22,6 +23,22 @@ it('classifies all types', () => {
 })
 it('sorts by date desc', () => { expect(ds().txs[0]!.id).toBe('t14') })
 it('finds me', () => { expect(meUser(ds()).login).toBe('owner') })
+it('with no owners.yaml, ownerNames is null, ownerOf is empty, and every Tx.owner is null', () => {
+  const d = ds()
+  expect(d.ownerNames).toBeNull()
+  expect(d.ownerOf.size).toBe(0)
+  expect(d.txs.every(t => t.owner === null)).toBe(true)
+})
+it('with owners.yaml, Tx.owner is the owner of the primary-side account, and Dataset carries ownerNames/ownerOf', () => {
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card PLN"]\n  sam:\n    accounts: ["acc-partner"]\n', 'owners.yaml')
+  const d = loadDataset(fixtureStore(), file)
+  expect(d.ownerNames).toEqual(['alex', 'sam'])
+  expect(d.ownerOf.get('acc-pln')).toBe('alex')
+  expect(d.ownerOf.get('acc-partner')).toBe('sam')
+  expect(d.txs.find(t => t.id === 't1')!.owner).toBe('alex') // primary account acc-pln
+  expect(d.txs.find(t => t.id === 't2')!.owner).toBe('sam') // primary account acc-partner
+  expect(d.txs.find(t => t.id === 't3')!.owner).toBeNull() // primary account acc-eur, unassigned
+})
 it('normalises a whitespace-only comment to null', () => {
   const s = Store.memory()
   const diff = fixtureDiff()
@@ -150,6 +167,7 @@ it('meUser throws NO_CACHE when the dataset has no main user', () => {
   const noMainUser: Dataset = {
     users: [{ id: 1, login: 'x', currency: 3, parent: 99, changed: 0 }],
     accounts: new Map(), tags: new Map(), instruments: new Map(), txs: [],
+    ownerNames: null, ownerOf: new Map(),
   }
   expect(() => meUser(noMainUser)).toThrow(expect.objectContaining({ code: 'NO_CACHE' }))
 })
@@ -161,7 +179,7 @@ it('meUser throws NO_CACHE when the dataset has no main user', () => {
 function labelTx(over: Partial<Tx>): Tx {
   return {
     id: 'x', date: '2026-09-01', type: 'expense', amount: 10, currency: 'EUR',
-    accountId: 'a', accountTitle: 'a', ownerId: 1, categoryId: null, topCategoryId: null,
+    accountId: 'a', accountTitle: 'a', ownerId: 1, owner: null, categoryId: null, topCategoryId: null,
     categoryPath: 'Uncategorized', merchant: null, payee: null, comment: null, hold: false, originalPayee: null, ...over,
   }
 }

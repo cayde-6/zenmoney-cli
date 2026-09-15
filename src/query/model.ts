@@ -1,6 +1,7 @@
 import type { Store } from '../store/store.js'
 import type { ZmAccount, ZmInstrument, ZmTag, ZmTransaction, ZmUser } from '../api/types.js'
 import { ZmError } from '../errors.js'
+import { matchOwners, type OwnersFile } from './owners.js'
 
 export type TxType = 'expense' | 'income' | 'refund' | 'transfer' | 'debt'
 
@@ -8,6 +9,11 @@ export interface Tx {
   id: string; date: string; type: TxType
   amount: number; currency: string // primary side, positive
   accountId: string; accountTitle: string; ownerId: number
+  // Owner name from owners.yaml's match against the primary-side account, or
+  // null when there's no owners.yaml (see Dataset.ownerNames) or the account
+  // is unassigned in it. Independent of `ownerId`, which is always the
+  // ZenMoney user id regardless of owners.yaml.
+  owner: string | null
   categoryId: string | null; topCategoryId: string | null
   categoryPath: string // 'Food/Cafe', 'Groceries', 'Uncategorized'
   merchant: string | null // merchant title, else payee
@@ -21,6 +27,12 @@ export interface Tx {
 export interface Dataset {
   users: ZmUser[]; accounts: Map<string, ZmAccount>; tags: Map<string, ZmTag>
   instruments: Map<number, ZmInstrument>; txs: Tx[]
+  // null when no owners.yaml exists at all — callers (see query/filters.ts's
+  // resolveOwner vs. resolveOwnerName) use that to decide whether `--owner`
+  // still means today's ZenMoney-user semantics (me/login/id) or the new
+  // name/unassigned semantics. Non-null (even if empty) once the file exists.
+  ownerNames: string[] | null
+  ownerOf: Map<string, string> // accountId -> owner name, from owners.yaml; empty when ownerNames is null
 }
 
 export const NO_CATEGORY = 'Uncategorized'
@@ -67,12 +79,19 @@ function topCategoryIdOf(tagId: string | null, tags: Map<string, ZmTag>): string
   return tags.has(tag.parent) ? tag.parent : tag.id
 }
 
-export function loadDataset(store: Store): Dataset {
+// `ownersFile` is the already-parsed owners.yaml (see query/owners.ts's
+// loadOwnersFile), or null/omitted when the family has no owners.yaml at
+// all — every CLI command that opens a Dataset loads it once from
+// ctx.paths.configDir and passes it through here, rather than this function
+// touching the filesystem itself.
+export function loadDataset(store: Store, ownersFile: OwnersFile | null = null): Dataset {
   const users = store.all('user')
   const accounts = new Map(store.all('account').map(a => [a.id, a]))
   const tags = new Map(store.all('tag').map(t => [t.id, t]))
   const instruments = new Map(store.all('instrument').map(i => [i.id, i]))
   const merchants = new Map(store.all('merchant').map(m => [m.id, m]))
+  const ownerNames = ownersFile ? [...ownersFile.owners.keys()] : null
+  const ownerOf = ownersFile ? matchOwners(accounts, ownersFile) : new Map<string, string>()
 
   const txs: Tx[] = []
   for (const t of store.all('transaction')) {
@@ -146,11 +165,12 @@ export function loadDataset(store: Store): Dataset {
 
     const account = accounts.get(accountId)
     const ownerId = account?.user ?? t.user
+    const owner = ownerOf.get(accountId) ?? null
 
     txs.push({
       id: t.id, date: t.date, type,
       amount, currency: instruments.get(instrumentId)?.shortTitle ?? '',
-      accountId, accountTitle: account?.title ?? accountId, ownerId,
+      accountId, accountTitle: account?.title ?? accountId, ownerId, owner,
       categoryId: catId, topCategoryId,
       categoryPath: catPath,
       merchant,
@@ -164,7 +184,7 @@ export function loadDataset(store: Store): Dataset {
 
   txs.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))
 
-  return { users, accounts, tags, instruments, txs }
+  return { users, accounts, tags, instruments, txs, ownerNames, ownerOf }
 }
 
 // Spend = expense and refund txs (income/transfer/debt are never "spend").

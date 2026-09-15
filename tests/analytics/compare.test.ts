@@ -39,7 +39,7 @@ it('a category present only in the period (nothing at all on the vs side) still 
   function tx(over: Partial<Tx>): Tx {
     return {
       id: 'x', date: '2026-09-01', type: 'expense', amount: 10, currency: 'EUR',
-      accountId: 'a', accountTitle: 'a', ownerId: 1, categoryId: 'c', topCategoryId: 'c',
+      accountId: 'a', accountTitle: 'a', ownerId: 1, owner: null, categoryId: 'c', topCategoryId: 'c',
       categoryPath: 'OnlyPeriod', merchant: null, payee: null, comment: null, hold: false, originalPayee: null, ...over,
     }
   }
@@ -53,7 +53,7 @@ it('a category present only on the vs side (nothing at all in the period) still 
   function tx(over: Partial<Tx>): Tx {
     return {
       id: 'x', date: '2026-08-01', type: 'expense', amount: 15, currency: 'PLN',
-      accountId: 'a', accountTitle: 'a', ownerId: 1, categoryId: 'c', topCategoryId: 'c',
+      accountId: 'a', accountTitle: 'a', ownerId: 1, owner: null, categoryId: 'c', topCategoryId: 'c',
       categoryPath: 'OnlyVs', merchant: null, payee: null, comment: null, hold: false, originalPayee: null, ...over,
     }
   }

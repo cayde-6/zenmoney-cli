@@ -77,7 +77,7 @@ it('sorts spentOtherCurrencies by currency name when a category spent in two oth
   function tx(over: Partial<Tx>): Tx {
     return {
       id: 'x', date: '2026-09-01', type: 'expense', amount: 10, currency: 'EUR',
-      accountId: 'a', accountTitle: 'a', ownerId: 10, categoryId: 'food', topCategoryId: 'food',
+      accountId: 'a', accountTitle: 'a', ownerId: 10, owner: null, categoryId: 'food', topCategoryId: 'food',
       categoryPath: 'Groceries', merchant: null, payee: null, comment: null, hold: false, originalPayee: null, ...over,
     }
   }
