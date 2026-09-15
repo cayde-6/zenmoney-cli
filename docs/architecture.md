@@ -128,32 +128,72 @@ returned, so an agent can decide whether to sync first.
 
 `zm status` (`cli/commands/status.ts`) is the one command with none of the
 above constraints: it never opens a network connection, never requires a
-token, and never touches `Store` at all — it never intentionally mutates
-the cache, but "read-only" for a WAL-mode SQLite database is nuanced enough
-that this needs stating precisely rather than as a blanket "never creates
-files".
+token, and never touches `Store` at all — and, unlike every other command,
+it must never write to the real cache file or its directory, not even a
+`-wal`/`-shm` sidecar, on any Node version this project supports.
 
 An earlier version tried a `file:<path>?mode=ro&immutable=1` URI filename
-first, since that reads the database without creating any `-wal`/`-shm`
-sidecar file at all — but `node:sqlite`'s support for URI filenames turned
-out to vary by Node version (confirmed broken on 22.13.0, working on 22
-latest and 24), which made the whole cache-diagnostic command behave
-differently depending on the exact Node patch version it ran on. `zm status`
-now instead copies the cache file into a private temp directory
-(`mkdtempSync`), copies the `-wal` file alongside it too if one exists
-(never `-shm` — it's just a shared-memory index SQLite rebuilds from `-wal`
-the moment it opens a file, meaningless outside the process that mapped it),
-and opens that copy with a normal (non-read-only) `DatabaseSync`. Opening
-the copy normally, rather than read-only, lets SQLite replay `-wal` into it,
-so data a writer has committed but not yet checkpointed is included — an
-in-flight, uncommitted transaction at the exact moment of the copy has no
-valid commit frame in the copied `-wal` and is simply ignored on open, same
-as for any other reader. The temp directory is removed (`rmSync`) in a
-`finally` once the read is done, whether it succeeded or not. This makes
-the real cache file and its directory read-only inputs to `zm status` in
-the literal sense: they're opened only via `copyFileSync`, never by
-`DatabaseSync`, so nothing next to the cache is ever created, modified, or
-left behind, on any supported Node version.
+first, since that reads the database without creating any sidecar file at
+all — but `node:sqlite`'s support for URI filenames turned out to vary by
+Node version (confirmed broken on 22.13.0, working on 22 latest and 24),
+which made the whole cache-diagnostic command behave differently depending
+on the exact Node patch version it ran on. `zm status` now instead copies
+the cache into a private temp directory and reads that copy, with two
+extra checks (detailed below) specifically to catch the copy being torn by
+a concurrent write:
+
+1. Create a temp directory (`mkdtempSync`), record a snapshot of the real
+   cache file — `size`/`mtimeMs`, plus the first 32 bytes of `-wal` (its
+   header: format version, page size, checkpoint sequence, both salts) if
+   one exists at all, `null` otherwise. Copy the cache file into the temp
+   directory (`copyFileSync`, requesting a copy-on-write clone via
+   `COPYFILE_FICLONE` where the filesystem supports one, transparently
+   falling back to a normal copy otherwise), then copy `-wal` alongside it
+   too if the snapshot just taken saw one (never `-shm` — it's just a
+   shared-memory index SQLite rebuilds from `-wal` the moment it opens a
+   file, meaningless outside the process that mapped it). If `-wal` existed
+   an instant ago but has disappeared by the time it's actually copied
+   (`ENOENT` — most likely a writer just checkpointed and removed it),
+   that's treated as a change to retry on (step 4), not a hard failure.
+2. Take the same size/mtime/`-wal`-header snapshot again. If anything
+   differs from step 1, a write landed in the middle of the copy — retry
+   (step 4). Copying the db file and `-wal` file is two separate,
+   non-atomic operations, so this is the only way to catch a checkpoint (or
+   any other write) landing between them and producing a torn pair that's
+   individually well-formed but mutually inconsistent.
+3. Open the COPY with a normal, non-read-only `DatabaseSync` — opening it
+   normally, rather than read-only, lets SQLite replay `-wal` into it, so
+   data a writer has committed but not yet checkpointed is included (an
+   in-flight, uncommitted transaction at the exact moment of the copy has
+   no valid commit frame in the copied `-wal` and is simply ignored on
+   open, same as for any other reader). Then run `PRAGMA quick_check` on
+   the copy: anything other than `ok` — the second, and last, line of
+   defense against a torn copy that the stability check in step 2 might
+   still have missed — is reported as `readable: false` with the check's
+   own message, without retrying (a bad copy isn't a timing problem more
+   attempts would fix). Otherwise read `lastSyncAt` as before.
+4. On a retry-eligible outcome (the `-wal` race in step 1, or a mismatch in
+   step 2), remove this attempt's temp directory and start over from step 1
+   with a fresh one, up to 3 attempts total. After 3 attempts still
+   unstable, report `readable: false` with `cache is being written by
+   another process, retry shortly` — at that point a writer is genuinely,
+   persistently active rather than status having hit one unlucky moment.
+
+The temp directory from every attempt (successful, retried, or failed) is
+removed (`rmSync`, with a few retries of its own for a filesystem that's
+briefly uncooperative) in a `finally`; removal failing is itself swallowed
+and never changes what `zm status` reports — a leftover temp file is not
+the caller's problem. A failure specifically writing into that temp
+directory (`ENOSPC`/`EACCES` on the destination, e.g. the temp filesystem
+being full — distinguished from a real cache-side permission problem via
+which path the error names) is still reported as `readable: false`, but
+with its message prefixed `could not snapshot the cache: `, so it reads as
+an environment problem rather than something wrong with the cache itself.
+This all makes the real cache file and its directory read-only inputs to
+`zm status` in the literal sense: they're only ever opened via
+`copyFileSync`/`statSync`, never by `DatabaseSync`, so nothing next to the
+cache is ever created, modified, or left behind, on any supported Node
+version.
 
 Either way, a missing/corrupted/permission-denied file is reported via
 `{ path, exists, readable, lastSyncAt, ageHours, error? }` rather than

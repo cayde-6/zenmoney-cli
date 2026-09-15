@@ -97,7 +97,7 @@ Run `zm <command> --help` for the exact flags and examples of any command.
 |---|---|---|
 | `zm auth` | `--token`, `--logout` | `{ saved: "keychain"\|"config" }` or `{ removed: true }` |
 | `zm sync` | `--full` | `{ upserted, deleted, full }` — `upserted` is a per-entity map of counts (e.g. `{ transaction: 12 }`), `deleted` is one total count across all entities, `full` mirrors `--full` |
-| `zm status` | – | `{ cache: { path, exists, readable, lastSyncAt, ageHours, error? }, token: { source: "env"\|"keychain"\|"config"\|null }, configDir, budgetDir, version }` — no network call, works with no token and no cache, never writes to the real cache file or its directory (reads a private temp copy instead, including any uncheckpointed WAL data), never prints the token itself, only its `source` |
+| `zm status` | – | `{ cache: { path, exists, readable, lastSyncAt, ageHours, error? }, token: { source: "env"\|"keychain"\|"config"\|null }, configDir, budgetDir, version }` — no network call, works with no token and no cache, never writes to the real cache file or its directory (reads a private temp copy instead, including any uncheckpointed WAL data; a copy torn by a concurrent write is retried a few times before `readable: false`), never prints the token itself, only its `source` |
 | `zm users` | – | `[{ id, login, currency, isMain }]` |
 | `zm accounts` | `--archived` | `[{ id, title, type, currency, balance, inBalance, archived, owner }]` |
 | `zm categories` | `--tree` | `[{ id, path, parentId, kind }]`, or nested `{ ...,children: [...] }` with `--tree` |

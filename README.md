@@ -100,10 +100,14 @@ exists, whether it's readable (plus an `error` message when it isn't),
 and the installed version. It makes no network call, works with no token
 and no cache at all, and never writes to the real cache file or its
 directory: it copies the cache (and its `-wal` file, if present) into a
-private temp directory, reads that copy, and removes the temp directory
-again — so any data a `zm sync` has committed but not yet checkpointed is
-included, and the real cache is only ever read from, never modified. So
-it's always safe to run first when something else isn't working.
+private temp directory and reads that copy instead, so any data a `zm sync`
+has committed but not yet checkpointed is included, and the real cache is
+only ever read from, never modified. A snapshot that a concurrent write
+happened to tear (caught by comparing the cache's size/`-wal` header before
+and after copying it, and by an integrity check on the copy itself) is
+retried a few times with a fresh copy before giving up with a "retry
+shortly" message — the temp directory is always removed again afterwards.
+So it's always safe to run first when something else isn't working.
 
 A few example commands, with real output shape (from a small neutral
 account: two users `owner`/`partner`, currencies PLN/EUR, categories like

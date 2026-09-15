@@ -75,10 +75,15 @@ Initial release of `@cayde-6/zenmoney-cli`.
   (`env`/`keychain`/`config`/`null`, never the token itself), `configDir`,
   `budgetDir`, and the installed version. Makes no network call, works
   without a token or a cache, and reads the cache without ever writing to
-  the real cache file or its directory: it copies the cache (and its `-wal`
-  file, if present) into a private temp directory, reads that copy —
-  including any data committed but not yet checkpointed — and removes the
-  temp directory again afterwards.
+  the real cache file or its directory, on any supported Node version: it
+  copies the cache (and its `-wal` file, if present) into a private temp
+  directory and opens that copy normally rather than read-only, so any data
+  committed but not yet checkpointed is included. A copy torn by a
+  concurrent write landing mid-copy is detected (comparing the cache's
+  size/`-wal` header before and after copying it, and via an integrity
+  check on the copy) and retried with a fresh copy a few times before
+  giving up with `readable: false` and a "retry shortly" message; the temp
+  directory is always removed again afterwards.
 
 ### Documentation
 

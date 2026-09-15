@@ -1,6 +1,6 @@
 import { it, expect } from 'vitest'
 import { writeFileSync, readFileSync, mkdirSync, statSync, existsSync, chmodSync, readdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { spawn } from 'node:child_process'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { run } from '../../src/cli/program.js'
@@ -156,18 +156,70 @@ it('reports a healthy cache as readable in a read-only cache directory', async (
     chmodSync(dir, 0o700) // restore so temp-dir cleanup can still remove it
   }
 })
-// The private temp directory status.ts creates to hold the cache copy must
-// not accumulate across runs — it's removed in a `finally`, regardless of
-// whether the read succeeded. Checked by prefix in the OS temp dir rather
-// than tracking the exact path (which status.ts doesn't expose), since a
-// stable count of `zm-status-*` entries before and after is enough to prove
-// nothing was left behind by this run.
-it('removes its private temp dir after status finishes', async () => {
+// Deterministic, non-vacuous versions of "the temp dir gets removed" live in
+// tests/cli/status-snapshot.test.ts (spying on mkdtempSync itself, both on
+// the success path and the corrupt-file path) rather than here: a plain
+// before/after count of `zm-status-*` names in the shared OS tmpdir can't
+// tell "nothing was created" apart from "something was created and removed"
+// and could collide with anything else on the machine using that prefix.
+
+// Review round item 1/6b: a checkpoint (or any other write) landing between
+// the two `copyFileSync` calls in a single snapshot attempt can produce a
+// torn, internally-inconsistent pair of files. A real concurrent writer
+// that commits and lets SQLite auto-checkpoint aggressively (a small
+// `wal_autocheckpoint`) is about as good a stress test for that as this
+// process can run without external tooling: every `zm status` call across
+// a bounded window must come back either `readable: false` (the stability
+// check or `quick_check` caught something) or `readable: true` with a
+// `lastSyncAt` that never regresses relative to an earlier read — since the
+// writer only ever advances `lastSyncAt`, a valid read can never see it go
+// backwards. Both the parent's read loop and the child's write loop are
+// bounded (wall-clock deadline plus a hard iteration cap) so this can never
+// hang the suite, and the child is always killed in `finally`.
+it('never regresses lastSyncAt or reports a failed integrity check under a rapidly-checkpointing concurrent writer', async () => {
   const t = seededContext()
-  const before = readdirSync(tmpdir()).filter(name => name.startsWith('zm-status-')).sort()
+  const child = spawn(process.execPath, ['-e', `
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(${JSON.stringify(t.ctx.paths.cacheDb)});
+    db.exec('PRAGMA journal_mode=WAL');
+    db.exec('PRAGMA wal_autocheckpoint=50');
+    const base = Date.parse('2030-01-01T00:00:00.000Z'); // well after the fixture's seeded lastSyncAt
+    const deadline = Date.now() + 5000;
+    let i = 0;
+    while (Date.now() < deadline && i < 200000) {
+      const iso = new Date(base + i).toISOString();
+      db.exec('BEGIN IMMEDIATE');
+      db.exec("INSERT OR REPLACE INTO meta(key, value) VALUES ('lastSyncAt', '" + iso + "')");
+      db.exec('COMMIT');
+      i++;
+    }
+    db.close();
+  `])
+  let childStderr = ''
+  child.stderr?.on('data', chunk => { childStderr += chunk })
 
-  expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
-
-  const after = readdirSync(tmpdir()).filter(name => name.startsWith('zm-status-')).sort()
-  expect(after).toEqual(before)
-})
+  try {
+    const deadline = Date.now() + 2000
+    let lastSeenMs: number | null = null
+    let reads = 0
+    while (Date.now() < deadline && reads < 300) {
+      const code = await run(['node', 'zm', 'status'], t.ctx)
+      expect(code).toBe(0)
+      const cache = JSON.parse(t.out[t.out.length - 1]!).data.cache
+      if (cache.readable) {
+        expect(typeof cache.lastSyncAt).toBe('string')
+        const ms = new Date(cache.lastSyncAt).getTime()
+        if (lastSeenMs !== null) expect(ms).toBeGreaterThanOrEqual(lastSeenMs)
+        lastSeenMs = ms
+      } else {
+        expect(typeof cache.error).toBe('string')
+      }
+      reads++
+    }
+    expect(reads).toBeGreaterThan(0)
+    expect(childStderr).toBe('')
+  } finally {
+    child.kill()
+    await new Promise(resolve => child.on('exit', resolve))
+  }
+}, 10_000)
