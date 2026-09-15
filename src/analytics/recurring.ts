@@ -1,5 +1,5 @@
 import type { MerchantSource, Tx } from '../query/model.js'
-import { merchantLabel } from '../query/model.js'
+import { merchantLabel, normalizeMerchantKey } from '../query/model.js'
 import { addMonths, compareNames, monthOf, round2, localMonth } from '../util.js'
 
 // The index signature makes this directly usable as a `--format table` row
@@ -9,13 +9,6 @@ export interface RecurringItem {
   monthsSeen: number; windowMonths: number; avgAmount: number; lastAmount: number; lastDate: string
   periodicity: 'monthly' | 'irregular'
   [field: string]: string | number | null
-}
-
-// Case-insensitive grouping key for a merchant label, with internal
-// whitespace collapsed too (not just trimmed) — 'Corner  Shop' and 'Corner
-// Shop' are the same subscription, not two.
-function normalizeKey(label: string): string {
-  return label.toLowerCase().replace(/\s+/g, ' ')
 }
 
 // The `months`-wide window ending at the calendar month of `now`, as YYYY-MM strings.
@@ -56,7 +49,7 @@ export function findRecurring(txs: Tx[], opts: { months: number; now: Date; minM
     // JSON.stringify(array) rather than a delimited string: merchant/categoryPath
     // text can itself contain any separator character, which a fixed-delimiter
     // key would risk colliding on (see suggestBudget's key for the same reasoning).
-    const key = JSON.stringify([normalizeKey(merchant), t.categoryPath, t.currency])
+    const key = JSON.stringify([normalizeMerchantKey(merchant), t.categoryPath, t.currency])
     let g = groups.get(key)
     if (!g) {
       g = { merchant, source, categoryPath: t.categoryPath, currency: t.currency, months: new Set(), sum: 0, count: 0, lastDate: t.date, lastAmount: t.amount, lastId: t.id }

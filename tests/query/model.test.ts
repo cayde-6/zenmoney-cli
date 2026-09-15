@@ -12,8 +12,8 @@ const byId = (id: string) => ds().txs.find(t => t.id === id)!
 it('excludes deleted', () => { expect(ds().txs.some(t => t.id === 't9')).toBe(false); expect(ds().txs).toHaveLength(22) })
 it('classifies all types', () => {
   expect(byId('t1')).toMatchObject({ type: 'expense', amount: 3000, currency: 'PLN', categoryPath: 'Groceries', merchant: 'FreshMart', ownerId: 10 })
-  expect(byId('t2')).toMatchObject({ type: 'expense', ownerId: 11, merchant: 'CornerShop' })
-  expect(byId('t2')).toMatchObject({ payee: 'CornerShop' }) // payee-only tx: merchant falls back to payee
+  expect(byId('t2')).toMatchObject({ type: 'expense', ownerId: 11, merchant: null })
+  expect(byId('t2')).toMatchObject({ payee: 'CornerShop' }) // payee-only tx: merchant stays null, payee is untouched
   expect(byId('t3')).toMatchObject({ categoryPath: 'Food/Cafe', topCategoryId: 'eat', currency: 'EUR' })
   expect(byId('t5')).toMatchObject({ type: 'refund', amount: 500, currency: 'PLN' })
   expect(byId('t6')).toMatchObject({ type: 'income', amount: 4200, currency: 'EUR' })

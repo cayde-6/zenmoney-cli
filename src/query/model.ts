@@ -16,7 +16,7 @@ export interface Tx {
   owner: string | null
   categoryId: string | null; topCategoryId: string | null
   categoryPath: string // 'Food/Cafe', 'Groceries', 'Uncategorized'
-  merchant: string | null // merchant title, else payee
+  merchant: string | null // resolved merchant title only; null if the tx has no merchant match (see merchantLabel for the payee/originalPayee/comment fallback)
   payee: string | null // raw payee text as entered, independent of a resolved merchant
   comment: string | null
   hold: boolean // ZenMoney's own marker for a not-yet-settled/pending transaction; never affects classification/aggregation
@@ -108,7 +108,7 @@ export function loadDataset(store: Store, ownersFile: OwnersFile | null = null):
 
     const payee = t.payee ? t.payee.trim() || null : null
     const merchantTitle = t.merchant ? merchants.get(t.merchant)?.title : undefined
-    const merchant = merchantTitle ?? payee
+    const merchant = merchantTitle ? merchantTitle.trim() || null : null
     const comment = t.comment ? t.comment.trim() || null : null
     const hold = t.hold ?? false
     const originalPayee = t.originalPayee ? t.originalPayee.trim() || null : null
@@ -228,4 +228,14 @@ export function merchantLabel(t: Tx): { label: string; source: MerchantSource } 
     if (trimmed) return { label: trimmed, source }
   }
   return null
+}
+
+// Shared by analytics/recurring.ts and analytics/spend.ts (`spend --by
+// merchant`) as the grouping key for a merchantLabel result, so the two
+// commands never disagree on which labels belong to the same
+// merchant/subscription. Case-insensitive, with internal whitespace
+// collapsed too (not just trimmed) — 'Corner  Shop' and 'Corner Shop' are
+// the same merchant, not two.
+export function normalizeMerchantKey(label: string): string {
+  return label.toLowerCase().replace(/\s+/g, ' ')
 }

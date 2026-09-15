@@ -144,11 +144,16 @@ cut off:
 
 ```
 $ zm tx --category Groceries --limit 3 --format table
-id  date        type     amount  currency  accountTitle  merchant
+id  date        type     amount  currency  accountTitle  merchant   payee
 t5  2026-09-10  refund   500     PLN       Card PLN      FreshMart
-t2  2026-09-05  expense  2000    PLN       Card Partner  CornerShop
+t2  2026-09-05  expense  2000    PLN       Card Partner             CornerShop
 t1  2026-09-02  expense  3000    PLN       Card PLN      FreshMart
 ```
+
+(t2's `payee` is `CornerShop` with no resolved `merchant` — the two fields
+are independent; `merchant` is `null`/blank rather than falling back to the
+payee text. `zm recurring` and `zm spend --by merchant` do fall back to
+`payee`, see below.)
 
 **Compare two months by category** (a few of the returned rows shown):
 
@@ -185,7 +190,10 @@ Real ZenMoney expenses often have no resolved merchant and no payee at all —
 the only text is a free-form comment (e.g. `"Netflix"`, `"Telegram Premium"`,
 `"iCloud"`). `recurring` (and `spend --by merchant`) fall back through
 `merchant` -> `payee` -> `originalPayee` -> `comment`, using the first
-non-empty one; `source` says which field it came from.
+non-empty one; `source` says which field it came from. Both commands group
+by the same case-insensitive, whitespace-collapsed key, so e.g. `"Netflix"`
+and `"netflix "` land in one group in both — displayed using the spelling
+from the group's most recent transaction.
 
 **Budget status for a month** (from a `default.yaml` with a couple of
 limits set; `unplanned` and the rest of `meta` omitted here for brevity):

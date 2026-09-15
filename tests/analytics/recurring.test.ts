@@ -2,6 +2,9 @@ import { it, expect } from 'vitest'
 import { loadDataset } from '../../src/query/model.js'
 import { findRecurring, recurringWindow } from '../../src/analytics/recurring.js'
 import { fixtureStore } from '../helpers.js'
+import { Store } from '../../src/store/store.js'
+import { fixtureDiff } from '../fixtures/diff.js'
+import type { ZmTransaction } from '../../src/api/types.js'
 
 const ds = loadDataset(fixtureStore())
 const now = new Date('2026-09-20T12:00:00')
@@ -43,6 +46,17 @@ it('merges merchant spellings case-insensitively/trimmed, using the latest spell
       lastDate: '2026-08-20', periodicity: 'monthly',
     },
   ])
+})
+// review round item 2: findRecurring and spend --by merchant must group by
+// the same normalized key regardless of which fallback field (merchant,
+// payee, originalPayee, comment) supplied the label.
+it('merges comment-derived spellings case-insensitively/trimmed too, same as a merchant field would', () => {
+  const base = { ...netflixTx, merchant: null, payee: null, originalPayee: null }
+  const early = { ...base, id: 'c1', date: '2026-07-10', comment: 'Netflix' }
+  const late = { ...base, id: 'c2', date: '2026-08-20', comment: 'netflix ' }
+  const result = findRecurring([early, late], { months: 2, now: new Date('2026-08-25T12:00:00'), minMonths: 2 })
+  expect(result).toHaveLength(1)
+  expect(result[0]).toMatchObject({ merchant: 'netflix', source: 'comment' })
 })
 it('same merchant in two currencies produces two groups, sorted currency asc', () => {
   // USD is inserted first and has the larger avg: with the sort comparator's
@@ -96,6 +110,30 @@ it('falls back to comment when merchant, payee, and originalPayee are all null',
       periodicity: 'monthly',
     },
   ])
+})
+// loadDataset regression (review round item 1): a payee-only transaction
+// (ZenMoney found no merchant match) used to fold `payee` into `Tx.merchant`,
+// so findRecurring reported source: 'merchant' for text that was actually a
+// raw payee. Built through a real Store + fixtureDiff (not a hand-set Tx) so
+// this exercises loadDataset itself, not just merchantLabel's fallback order.
+it('loadDataset: a payee-only transaction (no merchant match) surfaces as source "payee", not "merchant"', () => {
+  const store = Store.memory()
+  const diff = fixtureDiff()
+  const dates = ['2026-06-15', '2026-07-15', '2026-08-15', '2026-09-15']
+  for (const [i, date] of dates.entries()) {
+    const t: ZmTransaction = {
+      id: `tPayeeOnly${i}`, user: 10, date, income: 0, outcome: 25,
+      incomeAccount: 'acc-pln', outcomeAccount: 'acc-pln', incomeInstrument: 100, outcomeInstrument: 100,
+      tag: ['subs'], merchant: null, payee: 'GymPass', comment: null,
+      deleted: false, created: 1780000000, changed: 1780000000,
+    }
+    diff.transaction!.push(t)
+  }
+  store.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  const localDs = loadDataset(store)
+  const result = findRecurring(localDs.txs, { months: 4, now: new Date('2026-09-20T12:00:00') })
+  const item = result.find(r => r.merchant === 'GymPass')
+  expect(item).toMatchObject({ merchant: 'GymPass', source: 'payee', periodicity: 'monthly' })
 })
 it('the fallback chain prefers payee and originalPayee over comment when present', () => {
   const base = { ...netflixTx, categoryPath: 'Music', currency: 'PLN' }

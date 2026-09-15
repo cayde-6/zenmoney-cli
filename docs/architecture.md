@@ -424,18 +424,23 @@ months, and never suggesting a limit `<= 0`.
   through the window is still "monthly," rather than being penalized for a
   window that starts before it existed; a single occurrence is never
   "monthly," however narrow the window.
-- **Merchant label fallback chain.** Real ZenMoney expenses frequently have
-  no resolved merchant and no payee/originalPayee at all — the only
-  human-readable text is the free-form `comment` (e.g. `"Netflix"`,
-  `"Telegram Premium"`, `"iCloud"`). `query/model.ts: merchantLabel` falls
-  back through `merchant` -> `payee` -> `originalPayee` -> `comment`,
-  reporting which field won as `source`. `recurring` and `spend --by
-  merchant` both call this one function, so they can never disagree on what
-  a transaction's "merchant" is; the grouping key it feeds into `recurring`
-  is additionally lowercased and has internal whitespace collapsed (not
-  just trimmed), so spelling/spacing variants of the same label still merge.
-  `spend --by merchant`'s `(no merchant)` bucket now only appears when all
-  four of those fields are empty.
+- **Merchant label fallback chain.** `Tx.merchant` is the resolved merchant
+  title only (`null` when ZenMoney found no match) — it is never folded
+  together with `payee`, which stays independently readable on `Tx`. Real
+  ZenMoney expenses frequently have no resolved merchant and no
+  payee/originalPayee at all — the only human-readable text is the
+  free-form `comment` (e.g. `"Netflix"`, `"Telegram Premium"`, `"iCloud"`).
+  `query/model.ts: merchantLabel` falls back through `merchant` -> `payee`
+  -> `originalPayee` -> `comment`, reporting which field won as `source`.
+  `recurring` and `spend --by merchant` both call this one function, so
+  they can never disagree on what a transaction's "merchant" is. They also
+  share one grouping key, `query/model.ts: normalizeMerchantKey`
+  (lowercased, with internal whitespace collapsed, not just trimmed), so
+  spelling/spacing variants of the same label — `"Netflix"` and `"netflix
+  "` — land in one group in both commands; each group displays the label
+  spelling from its most recent transaction (ties broken by id).
+  `spend --by merchant`'s `(no merchant)` bucket only appears when all four
+  of those fields are empty.
 - **Owner = the primary side's account, not the raw `user` field.** See
   "Owner semantics" above — this is what makes `--owner` a meaningful
   filter on a shared account rather than an artifact of who happened to

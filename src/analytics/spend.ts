@@ -1,5 +1,5 @@
 import type { Tx } from '../query/model.js'
-import { NO_CATEGORY, isSpendTx, merchantLabel, spendSign } from '../query/model.js'
+import { NO_CATEGORY, isSpendTx, merchantLabel, normalizeMerchantKey, spendSign } from '../query/model.js'
 import type { ZmTag } from '../api/types.js'
 import { compareNames, monthOf, round2 } from '../util.js'
 import { ZmError } from '../errors.js'
@@ -26,29 +26,46 @@ export function sumByCurrency(txs: Tx[], sign: (t: Tx) => number): Amount[] {
 
 // 'merchant' uses the same merchant -> payee -> originalPayee -> comment
 // fallback as `zm recurring` (see query/model.ts's merchantLabel), so the two
-// commands never disagree about what a transaction's "merchant" is. The
-// '(no merchant)' bucket now only appears when all four of those fields are
-// empty.
-function keyOf(t: Tx, by: 'category' | 'month' | 'merchant'): string {
-  if (by === 'category') return t.categoryPath
-  if (by === 'month') return monthOf(t.date)
-  return merchantLabel(t)?.label ?? '(no merchant)'
+// commands never disagree about what a transaction's "merchant" is. Grouping
+// also uses the same case-insensitive, whitespace-collapsed grouping key
+// (normalizeMerchantKey, shared with findRecurring) so e.g. "Netflix" and
+// "netflix " land in one group in both commands; the group's displayed `key`
+// is the spelling from its most recent transaction, same as findRecurring's
+// `merchant` field. The '(no merchant)' bucket only appears when all four of
+// merchant/payee/originalPayee/comment are empty.
+function keyOf(t: Tx, by: 'category' | 'month' | 'merchant'): { key: string; display: string } {
+  if (by === 'category') return { key: t.categoryPath, display: t.categoryPath }
+  if (by === 'month') { const month = monthOf(t.date); return { key: month, display: month } }
+  const display = merchantLabel(t)?.label ?? '(no merchant)'
+  return { key: normalizeMerchantKey(display), display }
 }
 
 function compareKeys(by: 'category' | 'month' | 'merchant', a: string, b: string): number {
   return by === 'month' ? (a < b ? -1 : a > b ? 1 : 0) : compareNames(a, b)
 }
 
+interface Bucket { txs: Tx[]; display: string; lastDate: string; lastId: string }
+
 function groupTxs(txs: Tx[], by: 'category' | 'month' | 'merchant', sign: (t: Tx) => number): Group[] {
-  const buckets = new Map<string, Tx[]>()
+  const buckets = new Map<string, Bucket>()
   for (const t of txs) {
-    const key = keyOf(t, by)
-    const bucket = buckets.get(key) ?? []
-    bucket.push(t)
-    buckets.set(key, bucket)
+    const { key, display } = keyOf(t, by)
+    let bucket = buckets.get(key)
+    if (!bucket) {
+      bucket = { txs: [], display, lastDate: t.date, lastId: t.id }
+      buckets.set(key, bucket)
+    }
+    bucket.txs.push(t)
+    // Ties on the same date are broken deterministically by id (lexicographically
+    // greatest), matching findRecurring's tie-break, not by processing order.
+    if (t.date > bucket.lastDate || (t.date === bucket.lastDate && t.id > bucket.lastId)) {
+      bucket.lastDate = t.date
+      bucket.lastId = t.id
+      bucket.display = display
+    }
   }
-  return [...buckets.entries()]
-    .map(([key, bucket]) => ({ key, amounts: sumByCurrency(bucket, sign) }))
+  return [...buckets.values()]
+    .map(bucket => ({ key: bucket.display, amounts: sumByCurrency(bucket.txs, sign) }))
     .sort((a, b) => compareKeys(by, a.key, b.key))
 }
 

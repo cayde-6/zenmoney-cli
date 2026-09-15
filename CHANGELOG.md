@@ -145,13 +145,21 @@ Initial release of `@cayde-6/zenmoney-cli`.
 - `zm recurring` finds recurring payments on real ZenMoney data where an
   expense has no resolved merchant and no payee at all — common for
   subscriptions like Netflix or iCloud, where the only text is the
-  free-form `comment`. Both `zm recurring` and `zm spend --by merchant` now
+  free-form `comment`. Both `zm recurring` and `zm spend --by merchant`
   fall back through `merchant` -> `payee` -> `originalPayee` -> `comment`
-  (previously `recurring` only ever looked at `merchant`, so it returned
-  nothing at all for accounts without merchant-tagged transactions).
-  `recurring`'s output gains a `source` field naming which of those four
-  fields the label came from, and its grouping key now also collapses
-  internal whitespace (not just case and leading/trailing whitespace).
+  (previously `recurring` only ever looked at the `merchant` field, and
+  that field itself silently folded in `payee` whenever there was no real
+  merchant match — so a payee-only transaction was misreported as a
+  merchant hit, and `originalPayee`/`comment` were never reached at all).
+  `Tx.merchant` is now the resolved merchant title only (`null` when
+  ZenMoney found no match); `Tx.payee` is unaffected and stays independently
+  readable. `recurring`'s output gains a `source` field naming which of the
+  four fields the label actually came from. `recurring` and `spend --by
+  merchant` also now share one grouping key — lowercased, with internal
+  whitespace collapsed, not just trimmed — instead of `spend --by merchant`
+  grouping by the raw label as it did before: `"Netflix"` and `"netflix "`
+  now land in one group in both commands, displayed using the spelling
+  from the group's most recent transaction.
 
 ### Changed
 

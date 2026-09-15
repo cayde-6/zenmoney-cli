@@ -49,6 +49,18 @@ it('by merchant falls back to comment, same as findRecurring', () => {
   expect(group).toBeDefined()
   expect(group!.amounts).toEqual([{ currency: 'PLN', amount: 6000, count: 4 }])
 })
+// review round item 2: spend --by merchant used to group by the raw trimmed
+// label while findRecurring grouped by a lowercased, whitespace-collapsed
+// key, so the two commands could disagree on whether "Netflix" and
+// "netflix " were the same merchant. Both now share normalizeMerchantKey.
+it('groups case-insensitively/trimmed, same key as findRecurring, using the latest spelling as the display key', () => {
+  const early = tx({ id: 'g1', date: '2026-07-10', comment: 'Netflix' })
+  const late = tx({ id: 'g2', date: '2026-08-20', comment: 'netflix ' })
+  const result = spendBy([early, late], 'merchant')
+  expect(result).toHaveLength(1)
+  expect(result[0]!.key).toBe('netflix')
+  expect(result[0]!.amounts).toEqual([{ currency: 'EUR', amount: 20, count: 2 }])
+})
 it('the (no merchant) bucket only appears when merchant, payee, originalPayee, and comment are all empty', () => {
   const noLabel = { ...ds.txs.find(t => t.categoryPath === 'Music')!, id: 'nl1', merchant: null, payee: null, originalPayee: null, comment: null }
   expect(spendBy([noLabel], 'merchant').map(g => g.key)).toEqual(['(no merchant)'])
