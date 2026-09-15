@@ -65,6 +65,22 @@ it('the (no merchant) bucket only appears when merchant, payee, originalPayee, a
   const noLabel = { ...ds.txs.find(t => t.categoryPath === 'Music')!, id: 'nl1', merchant: null, payee: null, originalPayee: null, comment: null }
   expect(spendBy([noLabel], 'merchant').map(g => g.key)).toEqual(['(no merchant)'])
 })
+// Final-review item 9: the '(no merchant)' bucket used to be keyed by the
+// STRING '(no merchant)' (normalizeMerchantKey of the display sentinel) —
+// a real transaction whose comment happens to literally BE the text
+// "(no merchant)" would normalize to that exact same string key and
+// silently merge into the true no-merchant bucket, understating one and
+// overstating the other. The two must stay in separate groups.
+it('a transaction whose real comment is literally the text "(no merchant)" does not collide with the true no-merchant bucket', () => {
+  const realText = tx({ id: 'real1', merchant: null, payee: null, originalPayee: null, comment: '(no merchant)', amount: 7 })
+  const trueNoLabel = tx({ id: 'nolabel1', merchant: null, payee: null, originalPayee: null, comment: null, amount: 3 })
+  const groups = spendBy([realText, trueNoLabel], 'merchant')
+  expect(groups).toHaveLength(2)
+  const realGroup = groups.find(g => g.key === '(no merchant)' && g.amounts[0]!.amount === 7)
+  const sentinelGroup = groups.find(g => g.key === '(no merchant)' && g.amounts[0]!.amount === 3)
+  expect(realGroup).toBeDefined()
+  expect(sentinelGroup).toBeDefined()
+})
 it('income', () => {
   expect(incomeBy(sept, 'category')).toEqual([{ key: 'Salary', amounts: [{ currency: 'EUR', amount: 4200, count: 1 }] }])
 })

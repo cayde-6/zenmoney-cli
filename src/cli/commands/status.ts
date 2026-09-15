@@ -19,6 +19,14 @@ interface OwnersFileInfo { path: string; exists: boolean; valid: boolean; error?
 // file doesn't exist and when it parses cleanly; only a genuine parse/read
 // failure (bad yaml/shape, or an unreadable path — e.g. a directory) sets
 // it false and fills in `error`.
+//
+// `valid` covers PARSING ONLY (loadOwnersFile: shape, name rules, yaml
+// syntax) — it says nothing about whether the file's `accounts` entries
+// actually match real accounts without conflict, since that requires the
+// cache (matchOwners needs the real account list), which `zm status`
+// deliberately never opens. A well-formed owners.yaml with a genuine
+// matching conflict is still `valid: true` here; run `zm owners` to see
+// conflicts (data.conflicts) and other matching problems (warnings).
 function readOwnersFileInfo(configDir: string): OwnersFileInfo {
   const path = ownersFilePath(configDir)
   const exists = existsSync(path)

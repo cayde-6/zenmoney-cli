@@ -49,6 +49,21 @@ it('reports ownersFile.valid: false for a directory at owners.yaml\'s path', asy
   expect(ownersFile.valid).toBe(false)
   expect(ownersFile.error).toContain(join(t.ctx.paths.configDir, 'owners.yaml'))
 })
+// Final-review item 6: `valid` covers parsing only — `zm status` never
+// opens the cache, so it has no account list to detect a genuine matching
+// conflict against. A well-formed file with a would-be conflict (if it had
+// a real cache to match against) still reports valid: true here; `zm
+// owners` is where a conflict actually shows up (data.conflicts/warnings).
+it('reports ownersFile.valid: true even for a file whose entries would conflict, since status never opens the cache to check', async () => {
+  const t = testContext()
+  mkdirSync(t.ctx.paths.configDir, { recursive: true })
+  writeFileSync(
+    join(t.ctx.paths.configDir, 'owners.yaml'),
+    'owners:\n  alex:\n    accounts: ["Card"]\n  sam:\n    accounts: ["PLN"]\n',
+  )
+  expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
+  expect(t.json().data.ownersFile).toEqual({ path: join(t.ctx.paths.configDir, 'owners.yaml'), exists: true, valid: true })
+})
 it('never calls the network', async () => {
   const t = testContext({
     env: { ZENMONEY_TOKEN: 'tok' },

@@ -24,6 +24,16 @@ export function sumByCurrency(txs: Tx[], sign: (t: Tx) => number): Amount[] {
     .sort((a, b) => compareNames(a.currency, b.currency))
 }
 
+// A symbol, not the string '(no merchant)' itself: a real transaction whose
+// merchantLabel result HAPPENS to literally be the text "(no merchant)"
+// (an unusual but perfectly valid comment) must land in its own group, not
+// silently merge into the true no-merchant bucket just because both would
+// normalize to the same string key. A symbol can never equal any string a
+// real label could produce, so this rules the collision out structurally
+// rather than relying on the sentinel text being sufficiently "unlikely".
+const NO_MERCHANT_KEY = Symbol('no-merchant')
+const NO_MERCHANT_DISPLAY = '(no merchant)'
+
 // 'merchant' uses the same merchant -> payee -> originalPayee -> comment
 // fallback as `zm recurring` (see query/model.ts's merchantLabel), so the two
 // commands never disagree about what a transaction's "merchant" is. Grouping
@@ -33,11 +43,12 @@ export function sumByCurrency(txs: Tx[], sign: (t: Tx) => number): Amount[] {
 // is the spelling from its most recent transaction, same as findRecurring's
 // `merchant` field. The '(no merchant)' bucket only appears when all four of
 // merchant/payee/originalPayee/comment are empty.
-function keyOf(t: Tx, by: 'category' | 'month' | 'merchant'): { key: string; display: string } {
+function keyOf(t: Tx, by: 'category' | 'month' | 'merchant'): { key: string | typeof NO_MERCHANT_KEY; display: string } {
   if (by === 'category') return { key: t.categoryPath, display: t.categoryPath }
   if (by === 'month') { const month = monthOf(t.date); return { key: month, display: month } }
-  const display = merchantLabel(t)?.label ?? '(no merchant)'
-  return { key: normalizeMerchantKey(display), display }
+  const resolved = merchantLabel(t)
+  if (!resolved) return { key: NO_MERCHANT_KEY, display: NO_MERCHANT_DISPLAY }
+  return { key: normalizeMerchantKey(resolved.label), display: resolved.label }
 }
 
 function compareKeys(by: 'category' | 'month' | 'merchant', a: string, b: string): number {
@@ -47,7 +58,7 @@ function compareKeys(by: 'category' | 'month' | 'merchant', a: string, b: string
 interface Bucket { txs: Tx[]; display: string; lastDate: string; lastId: string }
 
 function groupTxs(txs: Tx[], by: 'category' | 'month' | 'merchant', sign: (t: Tx) => number): Group[] {
-  const buckets = new Map<string, Bucket>()
+  const buckets = new Map<string | typeof NO_MERCHANT_KEY, Bucket>()
   for (const t of txs) {
     const { key, display } = keyOf(t, by)
     let bucket = buckets.get(key)
