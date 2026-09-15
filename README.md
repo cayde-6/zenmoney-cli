@@ -357,7 +357,11 @@ Errors are printed to stderr as `{"error": {"code", "message", "hint"}}`
   the token at all. The lookup order, when it happens, is: `ZENMONEY_TOKEN`
   env var, then macOS Keychain, then `config.json`. Set
   `ZM_DISABLE_KEYCHAIN=1` to skip the Keychain entirely (e.g. in sandboxes
-  without `security` access) and fall back to `config.json`.
+  without `security` access) and fall back to `config.json`. If a Keychain
+  is available but the write to it fails, `zm auth` still falls back to
+  `config.json` (`{ "saved": "config" }`) and adds a `warnings` entry:
+  `"could not store the token in macOS Keychain, saved to <configFile>
+  instead"`.
 - Network requests to `api.zenmoney.ru` (`zm auth`, `zm sync`) time out
   after `ZM_TIMEOUT_MS` milliseconds (default `60000`); it must be a
   positive integer, or the command fails fast with `INVALID_ARGS`.

@@ -21,6 +21,19 @@ it('auth --token validates and saves to config', async () => {
   expect(await run(['node', 'zm', 'auth', '--token', 'abc'], t.ctx)).toBe(0)
   expect(t.json().data).toEqual({ saved: 'config' })
 })
+it('auth warns when a keychain is available but fails, and still saves to config', async () => {
+  const keychain: Keychain = {
+    get: () => null,
+    set: () => { throw new Error('keychain set failed') },
+    remove: () => {},
+  }
+  const t = testContext({ fetch: apiFetch([{ serverTimestamp: 1 }]), keychain })
+  expect(await run(['node', 'zm', 'auth', '--token', 'abc'], t.ctx)).toBe(0)
+  expect(t.json().data).toEqual({ saved: 'config' })
+  expect(t.json().warnings).toEqual([
+    `could not store the token in macOS Keychain, saved to ${t.ctx.paths.configFile} instead`,
+  ])
+})
 it('auth reads token from stdin when not a TTY', async () => {
   let capturedInit: any
   const fetchFn = (async (_url: string, init: any) => {

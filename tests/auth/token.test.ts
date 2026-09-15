@@ -2,7 +2,7 @@ import { it, expect } from 'vitest'
 import { mkdtempSync, statSync, readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { resolveToken, saveToken, removeToken, requireToken, macKeychain, type Keychain, type ExecFn } from '../../src/auth/token.js'
+import { resolveToken, saveToken, removeToken, requireToken, macKeychain, defaultExec, type Keychain, type ExecFn } from '../../src/auth/token.js'
 
 function memKeychain(v: string | null = null): Keychain & { v: string | null } {
   const k = { v, get: () => k.v, set: (t: string) => { k.v = t }, remove: () => { k.v = null } }
@@ -19,7 +19,7 @@ it('keychain wins over config', () => {
 })
 it('saves to config with mode 600 when no keychain', () => {
   const f = cfg()
-  expect(saveToken('c', { env: {}, keychain: null, configFile: f })).toBe('config')
+  expect(saveToken('c', { env: {}, keychain: null, configFile: f })).toEqual({ saved: 'config', keychainFailed: false })
   expect(statSync(f).mode & 0o777).toBe(0o600)
   expect(JSON.parse(readFileSync(f, 'utf8'))).toEqual({ token: 'c' })
   expect(resolveToken({ env: {}, keychain: null, configFile: f })).toBe('c')
@@ -37,13 +37,13 @@ it('writes config atomically (temp file, then rename) and leaves no temp file be
 })
 it('skips chmod on win32 without throwing', () => {
   const f = cfg()
-  expect(saveToken('c', { env: {}, keychain: null, configFile: f, platform: 'win32' })).toBe('config')
+  expect(saveToken('c', { env: {}, keychain: null, configFile: f, platform: 'win32' })).toEqual({ saved: 'config', keychainFailed: false })
   expect(JSON.parse(readFileSync(f, 'utf8'))).toEqual({ token: 'c' })
 })
 it('saves to keychain when available, removeToken clears both', () => {
   const f = cfg(), k = memKeychain()
   saveToken('c', { env: {}, keychain: null, configFile: f })
-  expect(saveToken('k', { env: {}, keychain: k, configFile: f })).toBe('keychain')
+  expect(saveToken('k', { env: {}, keychain: k, configFile: f })).toEqual({ saved: 'keychain', keychainFailed: false })
   removeToken({ env: {}, keychain: k, configFile: f })
   expect(resolveToken({ env: {}, keychain: k, configFile: f })).toBeNull()
 })
@@ -77,6 +77,16 @@ it('macKeychain.set sends the token via stdin to `security -i`, never in argv', 
     input: 'add-generic-password -U -s zenmoney-cli -a zm -w "abc"\n',
   })
 })
+
+// Regression test for the real bug: with stdio[0] = 'ignore', execFileSync
+// silently drops `input` instead of writing it to the child's stdin. Run
+// against a harmless command that echoes stdin back on stdout, so this fails
+// loudly (empty output) on the old ['ignore', 'pipe', 'ignore'] stdio array
+// instead of only failing indirectly, later, inside `security -i`.
+it('defaultExec actually delivers `input` to the child process stdin', () => {
+  const out = defaultExec('node', ['-e', 'process.stdin.pipe(process.stdout)'], 'hello from stdin')
+  expect(out).toBe('hello from stdin')
+})
 it('macKeychain.set verifies the value actually landed, and saveToken falls back if it did not', () => {
   // `security -i` can exit 0 (no thrown error) even when the batched command
   // silently failed to store anything — set() must catch that by re-reading.
@@ -88,7 +98,7 @@ it('macKeychain.set verifies the value actually landed, and saveToken falls back
   }
   const kc = macKeychain(exec)
   expect(() => kc.set('abc')).toThrow(expect.objectContaining({ code: 'AUTH' }))
-  expect(saveToken('abc', { env: {}, keychain: macKeychain(exec), configFile: f })).toBe('config')
+  expect(saveToken('abc', { env: {}, keychain: macKeychain(exec), configFile: f })).toEqual({ saved: 'config', keychainFailed: true })
   expect(JSON.parse(readFileSync(f, 'utf8'))).toEqual({ token: 'abc' })
 })
 it('saveToken rejects tokens with invalid characters before ever touching the keychain or writing config', () => {
@@ -127,7 +137,7 @@ it('saveToken falls back to config when keychain.set throws, without leaking the
   const f = cfg()
   const exec: ExecFn = () => { throw new Error('security failed for token SECRETVALUE') }
   const kc = macKeychain(exec)
-  expect(saveToken('SECRETVALUE', { env: {}, keychain: kc, configFile: f })).toBe('config')
+  expect(saveToken('SECRETVALUE', { env: {}, keychain: kc, configFile: f })).toEqual({ saved: 'config', keychainFailed: true })
   expect(JSON.parse(readFileSync(f, 'utf8'))).toEqual({ token: 'SECRETVALUE' })
 })
 
@@ -147,7 +157,7 @@ function flakyKeychain(initial: string | null, opts: { removeFails?: boolean } =
 it('saveToken clears a stale Keychain token when set fails but remove succeeds', () => {
   const f = cfg()
   const kc = flakyKeychain('TOKEN_OLD_123')
-  expect(saveToken('TOKEN_NEW_456', { env: {}, keychain: kc, configFile: f })).toBe('config')
+  expect(saveToken('TOKEN_NEW_456', { env: {}, keychain: kc, configFile: f })).toEqual({ saved: 'config', keychainFailed: true })
   expect(resolveToken({ env: {}, keychain: kc, configFile: f })).toBe('TOKEN_NEW_456')
 })
 it('saveToken throws AUTH, naming neither token, when a stale Keychain token cannot be removed either', () => {

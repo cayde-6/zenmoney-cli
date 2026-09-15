@@ -13,7 +13,14 @@ export interface Keychain {
 
 export type ExecFn = (file: string, args: string[], input?: string) => string
 
-const defaultExec: ExecFn = (file, args, input) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], input })
+// stdio[0] must be 'pipe' whenever `input` is given: with stdio[0] = 'ignore',
+// Node silently drops `input` instead of writing it to the child's stdin, so
+// `security -i` would receive nothing on its batch-command channel, exit 0
+// anyway, and leave the read-back verification below to (correctly) catch a
+// keychain write that never happened. stderr stays 'ignore' either way so a
+// thrown error can never carry the token via security's own stderr output.
+export const defaultExec: ExecFn = (file, args, input) =>
+  execFileSync(file, args, { encoding: 'utf8', stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'], input })
 
 const AUTH_FAILURE = () => new ZmError('AUTH', 'cannot save token to macOS Keychain', 'set ZENMONEY_TOKEN or retry')
 
@@ -30,10 +37,15 @@ export function validateTokenChars(token: string): void {
   if (INVALID_TOKEN_CHARS.test(token)) throw new ZmError('INVALID_ARGS', 'token contains invalid characters')
 }
 
-export function macKeychain(exec: ExecFn = defaultExec): Keychain {
+// `service` defaults to the real service name every production call site uses;
+// it's injectable only so the opt-in macOS integration test
+// (tests/auth/token-keychain-integration.test.ts) can exercise a real
+// `security` round-trip under a throwaway service name, never touching the
+// actual 'zenmoney-cli' entry in a developer's or CI machine's Keychain.
+export function macKeychain(exec: ExecFn = defaultExec, service = 'zenmoney-cli'): Keychain {
   const getStored = (): string | null => {
     try {
-      return exec('security', ['find-generic-password', '-s', 'zenmoney-cli', '-a', 'zm', '-w']).trim()
+      return exec('security', ['find-generic-password', '-s', service, '-a', 'zm', '-w']).trim()
     } catch {
       return null
     }
@@ -47,7 +59,7 @@ export function macKeychain(exec: ExecFn = defaultExec): Keychain {
       // could break out of the quoting must be rejected up front.
       validateTokenChars(token)
       try {
-        exec('security', ['-i'], `add-generic-password -U -s zenmoney-cli -a zm -w "${token}"\n`)
+        exec('security', ['-i'], `add-generic-password -U -s ${service} -a zm -w "${token}"\n`)
       } catch {
         // Never let the underlying error escape: execFileSync's error (and security's
         // own stderr) can otherwise carry the token in its message.
@@ -60,7 +72,7 @@ export function macKeychain(exec: ExecFn = defaultExec): Keychain {
     },
     remove(): void {
       try {
-        exec('security', ['delete-generic-password', '-s', 'zenmoney-cli', '-a', 'zm'])
+        exec('security', ['delete-generic-password', '-s', service, '-a', 'zm'])
       } catch {
         // nothing to remove
       }
@@ -134,7 +146,12 @@ export function tokenSource(deps: TokenDeps): TokenSource | null {
   return resolveTokenWithSource(deps).source
 }
 
-export function saveToken(token: string, deps: TokenDeps): 'keychain' | 'config' {
+// `keychainFailed` is true only when a keychain was available and its set()
+// actually threw (i.e. this call fell back to config.json despite having a
+// keychain to try) — never when deps.keychain was null to begin with (no
+// keychain on this platform at all, nothing to warn about). Callers (`zm
+// auth`) use it to decide whether to surface a fallback warning.
+export function saveToken(token: string, deps: TokenDeps): { saved: 'keychain' | 'config'; keychainFailed: boolean } {
   // Checked here too (not just inside macKeychain.set): this must fail outright
   // on any platform, including one with no keychain at all, rather than ever
   // silently falling back to writing the invalid token into config.json.
@@ -142,7 +159,7 @@ export function saveToken(token: string, deps: TokenDeps): 'keychain' | 'config'
   if (deps.keychain) {
     try {
       deps.keychain.set(token)
-      return 'keychain'
+      return { saved: 'keychain', keychainFailed: false }
     } catch {
       // Falling back to config.json isn't enough on its own: if the Keychain still
       // holds an older token, resolveToken would keep preferring it over the config
@@ -164,7 +181,7 @@ export function saveToken(token: string, deps: TokenDeps): 'keychain' | 'config'
   const config = readConfig(deps.configFile)
   config.token = token
   writeConfig(deps.configFile, config, deps.platform)
-  return 'config'
+  return { saved: 'config', keychainFailed: deps.keychain !== null }
 }
 
 export function removeToken(deps: TokenDeps): void {

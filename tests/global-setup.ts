@@ -17,6 +17,14 @@ import { join } from 'node:path'
 // directory, so no test — now or added later — can ever fall back to
 // touching the real home even if it forgets to pass its own explicit paths.
 export default function setup(): void {
+  // Stashed before HOME is overridden below, under a name no production code
+  // ever reads: the one dedicated, opt-in macOS Keychain integration test
+  // (tests/auth/token-keychain-integration.test.ts, ZM_KEYCHAIN_IT=1 only)
+  // needs the *real* HOME to reach the real login keychain at all — with HOME
+  // pointed at this run's fake temp dir, `security` can't find a keychain to
+  // use and fails outright rather than silently touching the wrong one, so
+  // this is not a loosening of the real-home isolation below.
+  process.env.ZM_REAL_HOME = process.env.HOME
   const home = mkdtempSync(join(tmpdir(), 'zm-vitest-home-'))
   process.env.HOME = home
   process.env.USERPROFILE = home

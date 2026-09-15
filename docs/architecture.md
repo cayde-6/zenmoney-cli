@@ -265,10 +265,15 @@ machine, `applyKeystrokes`). The token is validated by calling the diff
 endpoint before it's ever saved — this uses the token just supplied on this
 invocation, not a stored one, so `zm auth` never calls `resolveToken`.
 `saveToken` (`auth/token.ts`) prefers the macOS Keychain (service
-`zenmoney-cli`) when available, falling back to `~/.config/zm/config.json`
-elsewhere or on failure — written atomically (a mode-0600 temp file in the
-same dir, renamed into place, so there's never a window where the file
-exists at a more permissive mode). A stored token is only looked up by
+`zenmoney-cli`, injectable for tests) when available, falling back to
+`~/.config/zm/config.json` elsewhere or on failure — written atomically (a
+mode-0600 temp file in the same dir, renamed into place, so there's never a
+window where the file exists at a more permissive mode). If a Keychain is
+available but the write to it actually fails (as opposed to no Keychain
+existing on this platform at all), `saveToken`'s `keychainFailed: true`
+tells `zm auth` to add a `warnings` entry pointing at the fallback, so a
+silent Keychain failure is never mistaken for the token being safely stored
+there. A stored token is only looked up by
 commands that call the ZenMoney API: `zm sync` calls `requireToken`
 (`resolveToken`, throwing `AUTH` if nothing is found), checking in order the
 `ZENMONEY_TOKEN` env var, then the Keychain, then `config.json`. Every read
@@ -356,7 +361,13 @@ months, and never suggesting a limit `<= 0`.
   command on stdin rather than as a command-line argument, because argv is
   visible to any local user via `ps`. The same reasoning is why `zm auth
   --token <token>` is documented as the least-preferred way to supply a
-  token.
+  token. Delivering that stdin `input` requires stdio's first slot to be
+  `'pipe'`, not `'ignore'` — with `'ignore'`, Node silently drops `input`
+  instead of writing it, so `security -i` would receive nothing on its
+  batch-command channel yet still exit 0. `macKeychain.set`'s read-back
+  verification (compare the stored value against what was just written)
+  exists precisely to catch this class of "reported success, wrote
+  nothing" failure, whatever its cause.
 - **Duplicate limit key is a hard error.** If two budget keys (e.g.
   `Cafe` and `Food/Cafe`, spelled differently but resolving to the same
   category) both appear in the merged limit map — whether both are in the

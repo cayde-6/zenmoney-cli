@@ -189,7 +189,11 @@ export function registerSync(program: Command, ctx: AppContext): void {
       validateTokenChars(token)
       const timeoutMs = parseTimeoutMs(ctx.env)
       await fetchDiff(token, Math.floor(ctx.now().getTime() / 1000), { fetch: ctx.fetch, now: ctx.now, timeoutMs })
-      printResult({ data: { saved: saveToken(token, tokenDeps()) }, meta: {} }, format, ctx.stdout)
+      const result = saveToken(token, tokenDeps())
+      const warnings = result.keychainFailed
+        ? [`could not store the token in macOS Keychain, saved to ${ctx.paths.configFile} instead`]
+        : []
+      printResult({ data: { saved: result.saved }, meta: {}, ...(warnings.length ? { warnings } : {}) }, format, ctx.stdout)
     })
 
   program.command('sync')

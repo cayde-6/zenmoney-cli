@@ -121,6 +121,14 @@ Initial release of `@cayde-6/zenmoney-cli`.
   `opIncome`/`opOutcome`/`opIncomeInstrument`/`opOutcomeInstrument`, but
   those are typed-only (preserved in the cache's raw json) and are **not**
   surfaced on `Tx` or in `zm tx` output.
+- On macOS, `zm auth` actually delivers the token to `security -i` on
+  stdin: `execFileSync` was called with stdio's first slot set to
+  `'ignore'`, which makes Node silently drop the `input` string instead of
+  writing it to the child process, so the Keychain write always failed
+  (invisibly) and every token was written to `config.json` instead. Also,
+  when a Keychain **is** available but the write to it fails, `zm auth`
+  now adds a `warnings` entry saying so, instead of silently falling back
+  to `config.json` with no indication anything went wrong.
 
 ### Changed
 
