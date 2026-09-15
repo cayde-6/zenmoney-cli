@@ -57,8 +57,11 @@ it('status works with no token/cache and never prints a token', () => {
   expect(data.token).toEqual({ source: null })
 })
 it('--help documents that --owner me is the main user, not necessarily the token holder', () => {
-  expect(zm('--help').stdout).toMatch(/main user of the family account/)
-  expect(zm('--help').stdout).toMatch(/not necessarily the token holder/)
+  // `\s+` between words tolerates commander's own line-wrapping of this long
+  // option description at whatever width the terminal happens to be, rather
+  // than asserting an exact wrap point that shifts whenever the text grows.
+  expect(zm('--help').stdout).toMatch(/main user of the family\s+account/)
+  expect(zm('--help').stdout).toMatch(/not necessarily the token\s+holder/)
 })
 it('EPIPE from a closed stdout pipe exits quietly, with no stack trace on stderr', async () => {
   const child = spawn('node', ['dist/bin.js', 'categories', '--format', 'table'], { env, stdio: ['ignore', 'pipe', 'pipe'] })

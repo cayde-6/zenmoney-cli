@@ -58,7 +58,7 @@ export function buildProgram(ctx: AppContext): Command {
     .description('Read-only ZenMoney CLI. Agents: see SKILL.md in the package root.')
     .version(readVersion(), '-V, --version')
     .option('--format <format>', 'json | table', 'json')
-    .option('--owner <owner>', "me (main user of the family account, i.e. the user with no parent -- not necessarily the token holder) | all | user id | login", 'all')
+    .option('--owner <owner>', "all (default) | unassigned | an owners.yaml name (see zm owners), else me (main user of the family account, i.e. the user with no parent -- not necessarily the token holder) | user id | login", 'all')
     .addHelpText('after', `\nAgent guide: ${path.join(findPackageRoot(), 'SKILL.md')}\n`)
     .exitOverride()
     .configureOutput({ writeOut: ctx.stdout, writeErr: writeErrUnlessHandledElsewhere(ctx) })
