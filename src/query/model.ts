@@ -1,0 +1,177 @@
+import type { Store } from '../store/store.js'
+import type { ZmAccount, ZmInstrument, ZmTag, ZmTransaction, ZmUser } from '../api/types.js'
+import { ZmError } from '../errors.js'
+
+export type TxType = 'expense' | 'income' | 'refund' | 'transfer' | 'debt'
+
+export interface Tx {
+  id: string; date: string; type: TxType
+  amount: number; currency: string // primary side, positive
+  accountId: string; accountTitle: string; ownerId: number
+  categoryId: string | null; topCategoryId: string | null
+  categoryPath: string // 'Еда/Кафе', 'Продукты', 'Без категории'
+  merchant: string | null // merchant title, else payee
+  payee: string | null // raw payee text as entered, independent of a resolved merchant
+  comment: string | null
+  counterpart?: { accountId: string; accountTitle: string; amount: number; currency: string } // transfer/debt other side
+}
+
+export interface Dataset {
+  users: ZmUser[]; accounts: Map<string, ZmAccount>; tags: Map<string, ZmTag>
+  instruments: Map<number, ZmInstrument>; txs: Tx[]
+}
+
+export const NO_CATEGORY = 'Без категории'
+
+export function classify(t: ZmTransaction, accounts: Map<string, ZmAccount>, tags: Map<string, ZmTag>): TxType {
+  const incomeAccount = accounts.get(t.incomeAccount)
+  const outcomeAccount = accounts.get(t.outcomeAccount)
+  if (incomeAccount?.type === 'debt' || outcomeAccount?.type === 'debt') return 'debt'
+  if (t.income > 0 && t.outcome > 0 && t.incomeAccount !== t.outcomeAccount) return 'transfer'
+  if (t.outcome > 0) return 'expense'
+  if (t.income > 0) {
+    const firstTagId = t.tag?.[0] ?? null
+    const firstTag = firstTagId ? tags.get(firstTagId) : undefined
+    if (firstTag && firstTag.showOutcome && !firstTag.showIncome) return 'refund'
+    return 'income'
+  }
+  return 'expense'
+}
+
+export function categoryPath(tagId: string | null, tags: Map<string, ZmTag>): string {
+  if (!tagId) return NO_CATEGORY
+  const tag = tags.get(tagId)
+  if (!tag) return NO_CATEGORY
+  const titles: string[] = []
+  let current: ZmTag | undefined = tag
+  const seen = new Set<string>()
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id)
+    titles.unshift(current.title.trim())
+    current = current.parent ? tags.get(current.parent) : undefined
+  }
+  return titles.join('/')
+}
+
+function topCategoryIdOf(tagId: string | null, tags: Map<string, ZmTag>): string | null {
+  if (!tagId) return null
+  const tag = tags.get(tagId)
+  if (!tag) return null
+  if (!tag.parent) return tag.id
+  // A parent id that doesn't resolve to any known tag (a dangling reference)
+  // is treated as top-level under its own id, consistent with categoryPath
+  // (which already falls back to the tag's own title in this case) and with
+  // `categories --tree`.
+  return tags.has(tag.parent) ? tag.parent : tag.id
+}
+
+export function loadDataset(store: Store): Dataset {
+  const users = store.all('user')
+  const accounts = new Map(store.all('account').map(a => [a.id, a]))
+  const tags = new Map(store.all('tag').map(t => [t.id, t]))
+  const instruments = new Map(store.all('instrument').map(i => [i.id, i]))
+  const merchants = new Map(store.all('merchant').map(m => [m.id, m]))
+
+  const txs: Tx[] = []
+  for (const t of store.all('transaction')) {
+    if (t.deleted) continue
+    if (t.income === 0 && t.outcome === 0) continue // carries no money, never a real expense/income
+    const type = classify(t, accounts, tags)
+    const firstTagId = t.tag?.[0] ?? null
+    const catId = firstTagId ?? null
+    const catPath = categoryPath(catId, tags)
+    const topCategoryId = topCategoryIdOf(catId, tags)
+
+    const payee = t.payee ? t.payee.trim() || null : null
+    const merchantTitle = t.merchant ? merchants.get(t.merchant)?.title : undefined
+    const merchant = merchantTitle ?? payee
+    const comment = t.comment ? t.comment.trim() || null : null
+
+    let accountId: string, amount: number, instrumentId: number
+    let counterpart: Tx['counterpart']
+
+    if (type === 'expense') {
+      accountId = t.outcomeAccount
+      amount = t.outcome
+      instrumentId = t.outcomeInstrument
+    } else if (type === 'income' || type === 'refund') {
+      accountId = t.incomeAccount
+      amount = t.income
+      instrumentId = t.incomeInstrument
+    } else if (type === 'transfer') {
+      accountId = t.outcomeAccount
+      amount = t.outcome
+      instrumentId = t.outcomeInstrument
+      const cpAccount = accounts.get(t.incomeAccount)
+      counterpart = {
+        accountId: t.incomeAccount,
+        accountTitle: cpAccount?.title ?? t.incomeAccount,
+        amount: t.income,
+        currency: instruments.get(t.incomeInstrument)?.shortTitle ?? '',
+      }
+    } else {
+      // debt: primary side is the non-debt account
+      const outcomeIsDebt = accounts.get(t.outcomeAccount)?.type === 'debt'
+      if (outcomeIsDebt) {
+        accountId = t.incomeAccount
+        amount = t.income
+        instrumentId = t.incomeInstrument
+        const cpAccount = accounts.get(t.outcomeAccount)
+        counterpart = {
+          accountId: t.outcomeAccount,
+          accountTitle: cpAccount?.title ?? t.outcomeAccount,
+          amount: t.outcome,
+          currency: instruments.get(t.outcomeInstrument)?.shortTitle ?? '',
+        }
+      } else {
+        accountId = t.outcomeAccount
+        amount = t.outcome
+        instrumentId = t.outcomeInstrument
+        const cpAccount = accounts.get(t.incomeAccount)
+        counterpart = {
+          accountId: t.incomeAccount,
+          accountTitle: cpAccount?.title ?? t.incomeAccount,
+          amount: t.income,
+          currency: instruments.get(t.incomeInstrument)?.shortTitle ?? '',
+        }
+      }
+    }
+
+    const account = accounts.get(accountId)
+    const ownerId = account?.user ?? t.user
+
+    txs.push({
+      id: t.id, date: t.date, type,
+      amount, currency: instruments.get(instrumentId)?.shortTitle ?? '',
+      accountId, accountTitle: account?.title ?? accountId, ownerId,
+      categoryId: catId, topCategoryId,
+      categoryPath: catPath,
+      merchant,
+      payee,
+      comment,
+      ...(counterpart ? { counterpart } : {}),
+    })
+  }
+
+  txs.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))
+
+  return { users, accounts, tags, instruments, txs }
+}
+
+// Spend = expense and refund txs (income/transfer/debt are never "spend").
+// Shared by analytics/spend.ts, analytics/compare.ts, budget/status.ts and
+// budget/suggest.ts so the definition can't drift between them.
+export function isSpendTx(t: Tx): boolean {
+  return t.type === 'expense' || t.type === 'refund'
+}
+
+// Net sum sign for a spend tx: expense adds, refund subtracts.
+export function spendSign(t: Tx): number {
+  return t.type === 'expense' ? t.amount : -t.amount
+}
+
+export function meUser(ds: Dataset): ZmUser {
+  const user = ds.users.find(u => u.parent === null)
+  if (!user) throw new ZmError('NO_CACHE', 'cache has no main user', 'run zm sync --full')
+  return user
+}

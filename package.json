@@ -1,0 +1,56 @@
+{
+  "name": "zenmoney-cli",
+  "version": "0.1.0",
+  "description": "Read-only ZenMoney CLI for agents: transactions, per-currency analytics and a local budget",
+  "type": "module",
+  "bin": {
+    "zm": "dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "SKILL.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepublishOnly": "npm run check"
+  },
+  "keywords": [
+    "zenmoney",
+    "cli",
+    "budget",
+    "finance",
+    "agent",
+    "personal-finance",
+    "ai-agent",
+    "llm",
+    "sqlite"
+  ],
+  "author": "cayde-6",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cayde-6/zenmoney-cli.git"
+  },
+  "homepage": "https://github.com/cayde-6/zenmoney-cli#readme",
+  "bugs": {
+    "url": "https://github.com/cayde-6/zenmoney-cli/issues"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^14.0.3",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

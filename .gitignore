@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.sqlite
+.superpowers/
+coverage/
+*.tgz
+.DS_Store
