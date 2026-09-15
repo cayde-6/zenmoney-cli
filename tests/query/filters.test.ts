@@ -12,7 +12,7 @@ const ids = (f: any) => applyFilters(ds, f).map(t => t.id).sort()
 // to exercise exact-vs-substring priority; the fixture's account titles don't
 // happen to overlap that way.
 function accountDataset(accounts: ZmAccount[]): Dataset {
-  return { users: ds.users, accounts: new Map(accounts.map(a => [a.id, a])), tags: ds.tags, instruments: ds.instruments, txs: [], ownerNames: null, ownerOf: new Map() }
+  return { users: ds.users, accounts: new Map(accounts.map(a => [a.id, a])), tags: ds.tags, instruments: ds.instruments, txs: [], ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [] }
 }
 function account(id: string, title: string): ZmAccount {
   return { id, user: 10, instrument: 100, type: 'cash', title, balance: 0, inBalance: true, archive: false, changed: 0 }
@@ -40,7 +40,7 @@ it('category includes children and matches by leaf title', () => {
 it('resolveCategory: duplicate full-path match is ambiguous', () => {
   const dupTags = new Map(ds.tags)
   dupTags.set('food2', { id: 'food2', user: 10, title: 'Groceries', parent: null, showIncome: false, showOutcome: true, changed: 0 })
-  const dupDs: Dataset = { users: ds.users, accounts: ds.accounts, tags: dupTags, instruments: ds.instruments, txs: [], ownerNames: null, ownerOf: new Map() }
+  const dupDs: Dataset = { users: ds.users, accounts: ds.accounts, tags: dupTags, instruments: ds.instruments, txs: [], ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [] }
   try { resolveCategory(dupDs, 'Groceries'); throw new Error('no throw') }
   catch (e: any) {
     expect(e.code).toBe('INVALID_ARGS')
@@ -72,13 +72,34 @@ it('owner', () => {
   expect(() => resolveOwner(ds, 'bob')).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
   expect(ids({ month: '2026-09', owner: 'partner' })).toEqual(['t2'])
 })
-it('resolveOwnerName: all (default), unassigned, a known name, and an unknown name with a hint', () => {
-  expect(resolveOwnerName(['alex', 'sam'], undefined)).toBe('all')
-  expect(resolveOwnerName(['alex', 'sam'], 'all')).toBe('all')
-  expect(resolveOwnerName(['alex', 'sam'], 'unassigned')).toBe('unassigned')
-  expect(resolveOwnerName(['alex', 'sam'], 'alex')).toBe('alex')
-  try { resolveOwnerName(['alex', 'sam'], 'ale'); throw new Error('no throw') }
-  catch (e: any) { expect(e.code).toBe('INVALID_ARGS'); expect(e.hint).toMatch(/alex/) }
+it('resolveOwnerName: all (default), unassigned, a known name, and an unknown name with a full-list hint', () => {
+  expect(resolveOwnerName(['alex', 'sam'], 'owners.yaml', undefined)).toBe('all')
+  expect(resolveOwnerName(['alex', 'sam'], 'owners.yaml', 'all')).toBe('all')
+  expect(resolveOwnerName(['alex', 'sam'], 'owners.yaml', 'unassigned')).toBe('unassigned')
+  expect(resolveOwnerName(['alex', 'sam'], 'owners.yaml', 'alex')).toBe('alex')
+  // Review round item 4: the hint lists every defined name (not just the
+  // top-3 closest by edit distance, unlike category/account's did-you-mean),
+  // names the file's path, and lists 'all'/'unassigned' as always accepted.
+  try { resolveOwnerName(['alex', 'sam'], '/home/x/.config/zm/owners.yaml', 'ale'); throw new Error('no throw') }
+  catch (e: any) {
+    expect(e.code).toBe('INVALID_ARGS')
+    expect(e.message).toBe('unknown owner: ale')
+    expect(e.hint).toBe('owners.yaml (/home/x/.config/zm/owners.yaml) defines: alex, sam; also accepted: all, unassigned')
+  }
+})
+// Review round item 7: --owner is compared case-insensitively against file
+// owner names, but the returned/stored value is always the file's own
+// spelling (so Tx.owner/accounts.owner never show a caller's casing).
+it('resolveOwnerName matches case-insensitively but returns the file\'s own spelling', () => {
+  expect(resolveOwnerName(['Alex', 'sam'], 'owners.yaml', 'alex')).toBe('Alex')
+  expect(resolveOwnerName(['Alex', 'sam'], 'owners.yaml', 'ALEX')).toBe('Alex')
+  expect(resolveOwnerName(['Alex', 'sam'], 'owners.yaml', 'SAM')).toBe('sam')
+})
+it('resolveOwnerName hint says so when owners.yaml defines no owners at all', () => {
+  try { resolveOwnerName([], '/x/owners.yaml', 'alex'); throw new Error('no throw') }
+  catch (e: any) {
+    expect(e.hint).toBe('owners.yaml (/x/owners.yaml) defines no owners; also accepted: all, unassigned')
+  }
 })
 // Once owners.yaml exists, --owner switches from ZenMoney-user semantics
 // (me/login/id) to name/unassigned/all semantics, driven by Tx.owner rather

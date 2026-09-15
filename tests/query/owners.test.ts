@@ -1,13 +1,28 @@
 import { it, expect } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { parseOwnersFile, loadOwnersFile, ownersFilePath, matchOwners } from '../../src/query/owners.js'
+import { parseOwnersFile, loadOwnersFile, ownersFilePath, matchOwners, entryMatchesAccount } from '../../src/query/owners.js'
 import type { ZmAccount } from '../../src/api/types.js'
 
-function account(id: string, title: string): ZmAccount {
-  return { id, user: 10, instrument: 100, type: 'cash', title, balance: 0, inBalance: true, archive: false, changed: 0 }
+function account(id: string, title: string, over: Partial<ZmAccount> = {}): ZmAccount {
+  return { id, user: 10, instrument: 100, type: 'cash', title, balance: 0, inBalance: true, archive: false, changed: 0, ...over }
 }
+
+// Emoji/symbols used below are built from code points, never typed literally,
+// per the no-Cyrillic/no-NUL repo convention extended here to keep this test
+// file's own source free of hand-typed multibyte literals.
+const CAR = String.fromCodePoint(0x1f697) // car
+const HEART = String.fromCodePoint(0x2764) // heavy black heart
+const FE0F = String.fromCodePoint(0xfe0f) // variation selector-16
+const MAN = String.fromCodePoint(0x1f468)
+const WOMAN = String.fromCodePoint(0x1f469)
+const ZWJ = String.fromCodePoint(0x200d)
+const FAMILY = MAN + ZWJ + WOMAN // one grapheme cluster (man ZWJ woman)
+const MERMAID = String.fromCodePoint(0x1f9dc)
+const SKIN_LIGHT = String.fromCodePoint(0x1f3fb)
+const FEMALE_SIGN = String.fromCodePoint(0x2640)
+const MERMAID_LIGHT_FEMALE = MERMAID + SKIN_LIGHT + ZWJ + FEMALE_SIGN + FE0F // one grapheme cluster
 
 it('parses a well-formed owners file', () => {
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card Alex", "acc-id-123"]\n  sam:\n    accounts: ["Sam"]\n', 'owners.yaml')
@@ -38,6 +53,16 @@ it('rejects an owner name with characters outside [A-Za-z0-9._-]', () => {
     expect.objectContaining({ code: 'INVALID_ARGS', message: 'owners.yaml: invalid owner name "alex smith"' }),
   )
 })
+// Review round: owner names must START with a letter — a name like "1alex"
+// or "-alex" or "_alex" is syntactically inside [A-Za-z0-9._-] but must
+// still be rejected.
+it('rejects an owner name that does not start with a letter', () => {
+  for (const name of ['1alex', '-alex', '_alex', '.alex']) {
+    expect(() => parseOwnersFile(`owners:\n  "${name}":\n    accounts: [a]\n`, 'owners.yaml')).toThrow(
+      expect.objectContaining({ code: 'INVALID_ARGS', message: `owners.yaml: invalid owner name "${name}"` }),
+    )
+  }
+})
 it('rejects the reserved owner names "all" and "unassigned"', () => {
   expect(() => parseOwnersFile('owners:\n  all:\n    accounts: [a]\n', 'owners.yaml')).toThrow(
     expect.objectContaining({ code: 'INVALID_ARGS', message: 'owners.yaml: owner name "all" is reserved' }),
@@ -52,6 +77,16 @@ it('rejects __proto__/constructor/prototype as owner names', () => {
       expect.objectContaining({ code: 'INVALID_ARGS' }),
     )
   }
+})
+// Review round: a bare (unquoted) numeric yaml key resolves to a number, not
+// a string — reject it explicitly rather than silently stringifying it,
+// even though "123" would also fail the must-start-with-a-letter check; a
+// key like `1e2` could otherwise round-trip through Number->String as a
+// different-looking string than what was written.
+it('rejects a bare numeric owner key (yaml resolves it to a number, not a string)', () => {
+  expect(() => parseOwnersFile('owners:\n  123:\n    accounts: [a]\n', 'owners.yaml')).toThrow(
+    expect.objectContaining({ code: 'INVALID_ARGS' }),
+  )
 })
 it('rejects an "owners" value that is not an object', () => {
   expect(() => parseOwnersFile('owners: nope\n', 'owners.yaml')).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
@@ -71,8 +106,8 @@ it('rejects a non-array or non-string "accounts" value', () => {
 // Only the owner NAME is restricted to [A-Za-z0-9._-] — an account entry may
 // contain any Unicode, e.g. an emoji title prefix, without needing escaping.
 it('accepts Unicode (emoji) in account entries', () => {
-  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["🚗 Alex"]\n', 'owners.yaml')
-  expect(file.owners.get('alex')).toEqual(['🚗 Alex'])
+  const file = parseOwnersFile(`owners:\n  alex:\n    accounts: ["${CAR} Alex"]\n`, 'owners.yaml')
+  expect(file.owners.get('alex')).toEqual([`${CAR} Alex`])
 })
 
 it('loadOwnersFile returns null when the file does not exist', () => {
@@ -84,28 +119,36 @@ it('loadOwnersFile reads and parses an existing file at <dir>/owners.yaml', () =
   writeFileSync(ownersFilePath(dir), 'owners:\n  alex:\n    accounts: [a]\n')
   expect([...loadOwnersFile(dir)!.owners]).toEqual([['alex', ['a']]])
 })
+// Review round: a directory (or otherwise unreadable file) at owners.yaml's
+// path must fail with a clear INVALID_ARGS naming the path, not an
+// unhandled EISDIR/EACCES exception.
+it('loadOwnersFile throws INVALID_ARGS naming the path when owners.yaml is a directory', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zm-owners-'))
+  mkdirSync(ownersFilePath(dir))
+  expect(() => loadOwnersFile(dir)).toThrow(expect.objectContaining({ code: 'INVALID_ARGS', message: expect.stringContaining(ownersFilePath(dir)) }))
+})
 
 it('matchOwners: matches by exact account id', () => {
   const accounts = new Map([['acc-1', account('acc-1', 'Some Card')]])
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["acc-1"]\n', 'owners.yaml')
-  expect([...matchOwners(accounts, file)]).toEqual([['acc-1', 'alex']])
+  expect([...matchOwners(accounts, file).ownerOf]).toEqual([['acc-1', 'alex']])
 })
 it('matchOwners: matches by case-insensitive, trimmed title substring', () => {
   const accounts = new Map([['acc-1', account('acc-1', '  Card Alex  ')]])
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["card alex"]\n', 'owners.yaml')
-  expect([...matchOwners(accounts, file)]).toEqual([['acc-1', 'alex']])
+  expect([...matchOwners(accounts, file).ownerOf]).toEqual([['acc-1', 'alex']])
 })
 it('matchOwners: a blank (whitespace-only) entry matches nothing, rather than every account', () => {
   const accounts = new Map([['acc-1', account('acc-1', 'Some Card')]])
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["   "]\n', 'owners.yaml')
-  expect(matchOwners(accounts, file).size).toBe(0)
+  expect(matchOwners(accounts, file).ownerOf.size).toBe(0)
 })
 it('matchOwners: an account matched by no entry is left out (unassigned)', () => {
   const accounts = new Map([['acc-1', account('acc-1', 'Nothing Matches')]])
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card Alex"]\n', 'owners.yaml')
-  expect(matchOwners(accounts, file).size).toBe(0)
+  expect(matchOwners(accounts, file).ownerOf.size).toBe(0)
 })
-it('matchOwners: an account matched by two different owners is a conflict error naming both', () => {
+it('matchOwners: an account matched by two different owners (non-archived) is a conflict error naming both, with a pin-by-id hint', () => {
   const accounts = new Map([['acc-1', account('acc-1', 'Shared Card')]])
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Shared"]\n  sam:\n    accounts: ["Card"]\n', 'owners.yaml')
   try {
@@ -117,10 +160,83 @@ it('matchOwners: an account matched by two different owners is a conflict error 
     expect(e.message).toContain('acc-1')
     expect(e.message).toContain('alex')
     expect(e.message).toContain('sam')
+    expect(e.hint).toBe('pin it to one owner by account id, see zm owners --archived')
   }
 })
 it('matchOwners: two entries of the SAME owner both matching the same account is not a conflict', () => {
   const accounts = new Map([['acc-1', account('acc-1', 'Card Alex')]])
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["acc-1", "Card"]\n', 'owners.yaml')
-  expect([...matchOwners(accounts, file)]).toEqual([['acc-1', 'alex']])
+  expect([...matchOwners(accounts, file).ownerOf]).toEqual([['acc-1', 'alex']])
+})
+// Review round item 2: an exact account-id entry wins over another owner's
+// mere substring match — no conflict in that case.
+it('matchOwners: an exact account-id entry wins over a different owner\'s substring match (no conflict)', () => {
+  const accounts = new Map([['acc-1', account('acc-1', 'Shared Family Card')]])
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["acc-1"]\n  sam:\n    accounts: ["Family"]\n', 'owners.yaml')
+  const { ownerOf, warnings } = matchOwners(accounts, file)
+  expect([...ownerOf]).toEqual([['acc-1', 'alex']])
+  expect(warnings).toEqual([])
+})
+// Review round item 2: a conflict on an ARCHIVED-only account must not
+// break the command — it's resolved as unassigned, with a warning, instead
+// of throwing.
+it('matchOwners: a conflict on an archived account is a warning, not an error, and leaves it unassigned', () => {
+  const accounts = new Map([['acc-1', account('acc-1', 'Shared Card', { archive: true })]])
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Shared"]\n  sam:\n    accounts: ["Card"]\n', 'owners.yaml')
+  const { ownerOf, warnings } = matchOwners(accounts, file)
+  expect(ownerOf.has('acc-1')).toBe(false)
+  expect(warnings).toEqual(['account "Shared Card" (acc-1) matches owners alex and sam; treated as unassigned'])
+})
+
+// --- Emoji/symbol matching (review round item 1) ---
+// Entries with no letters or digits at all must align to whole
+// grapheme-cluster boundaries in the title, using Intl.Segmenter — a plain
+// substring match on code points would happily match a fragment of a
+// larger cluster (e.g. the base emoji of a ZWJ sequence). U+FE0F (variation
+// selector-16) is stripped from both sides first, after NFC normalization.
+it('emoji entry: matches a title after normalizing NFC and stripping U+FE0F on both sides', () => {
+  const withVs16 = new Map([['acc-1', account('acc-1', `${HEART}${FE0F} Card`)]])
+  const withoutVs16 = new Map([['acc-2', account('acc-2', `${HEART} Card`)]])
+  const fileWithVs16Entry = parseOwnersFile(`owners:\n  alex:\n    accounts: ["${HEART}${FE0F}"]\n`, 'owners.yaml')
+  const fileWithoutVs16Entry = parseOwnersFile(`owners:\n  alex:\n    accounts: ["${HEART}"]\n`, 'owners.yaml')
+  // FE0F on the title only
+  expect(matchOwners(withVs16, fileWithoutVs16Entry).ownerOf.get('acc-1')).toBe('alex')
+  // FE0F on the entry only
+  expect(matchOwners(withoutVs16, fileWithVs16Entry).ownerOf.get('acc-2')).toBe('alex')
+  // FE0F on both
+  expect(matchOwners(withVs16, fileWithVs16Entry).ownerOf.get('acc-1')).toBe('alex')
+  // FE0F on neither
+  expect(matchOwners(withoutVs16, fileWithoutVs16Entry).ownerOf.get('acc-2')).toBe('alex')
+})
+it('emoji entry: a bare base emoji does NOT match inside a larger ZWJ grapheme cluster in the title', () => {
+  const accounts = new Map([['acc-1', account('acc-1', `${FAMILY} Joint`)]])
+  const file = parseOwnersFile(`owners:\n  alex:\n    accounts: ["${MAN}"]\n`, 'owners.yaml')
+  expect(matchOwners(accounts, file).ownerOf.size).toBe(0)
+})
+it('emoji entry: the full ZWJ+skin-tone grapheme cluster matches, with or without a trailing U+FE0F', () => {
+  const accounts = new Map([['acc-1', account('acc-1', `${MERMAID_LIGHT_FEMALE} Mermaid`)]])
+  const fileFullSequence = parseOwnersFile(`owners:\n  alex:\n    accounts: ["${MERMAID_LIGHT_FEMALE}"]\n`, 'owners.yaml')
+  const withoutFe0f = MERMAID_LIGHT_FEMALE.replace(FE0F, '')
+  const fileWithoutFe0f = parseOwnersFile(`owners:\n  alex:\n    accounts: ["${withoutFe0f}"]\n`, 'owners.yaml')
+  expect(matchOwners(accounts, fileFullSequence).ownerOf.get('acc-1')).toBe('alex')
+  expect(matchOwners(accounts, fileWithoutFe0f).ownerOf.get('acc-1')).toBe('alex')
+})
+it('emoji entry: the bare base emoji does NOT match when it is only part of a larger grapheme cluster (skin tone + ZWJ)', () => {
+  const accounts = new Map([['acc-1', account('acc-1', `${MERMAID_LIGHT_FEMALE} Mermaid`)]])
+  const file = parseOwnersFile(`owners:\n  alex:\n    accounts: ["${MERMAID}"]\n`, 'owners.yaml')
+  expect(matchOwners(accounts, file).ownerOf.size).toBe(0)
+})
+it('entries containing letters/digits keep plain case-insensitive substring matching, even alongside emoji', () => {
+  const accounts = new Map([['acc-1', account('acc-1', `${CAR} Alex`)]])
+  const file = parseOwnersFile(`owners:\n  alex:\n    accounts: ["${CAR} alex"]\n`, 'owners.yaml')
+  expect(matchOwners(accounts, file).ownerOf.get('acc-1')).toBe('alex')
+})
+
+// entryMatchesAccount is the per-entry primitive `zm owners` uses to warn
+// about entries matching zero (or implausibly many) accounts.
+it('entryMatchesAccount exposes the same matching rule matchOwners uses internally', () => {
+  expect(entryMatchesAccount('acc-1', account('acc-1', 'Some Card'))).toBe(true)
+  expect(entryMatchesAccount('card', account('acc-1', 'Some Card'))).toBe(true)
+  expect(entryMatchesAccount('nope', account('acc-1', 'Some Card'))).toBe(false)
+  expect(entryMatchesAccount(HEART, account('acc-1', `${HEART}${FE0F} Card`))).toBe(true)
 })

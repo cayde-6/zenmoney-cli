@@ -111,13 +111,25 @@ export function resolveOwner(ds: Dataset, owner: string | undefined): Set<number
 
 // `--owner` semantics once owners.yaml exists: 'all' (default), 'unassigned',
 // or one of the file's own owner names — the old me/login/id semantics
-// (resolveOwner above) no longer apply. `ownerNames` is `Dataset.ownerNames`,
-// already known non-null by every caller.
-export function resolveOwnerName(ownerNames: string[], owner: string | undefined): string {
+// (resolveOwner above) no longer apply. `ownerNames` is `Dataset.ownerNames`
+// and `filePath` is `Dataset.ownersPath`, both already known non-null by
+// every caller. Matching is case-insensitive (so `--owner ALEX` finds an
+// owner spelled "alex"), but the returned value is always the file's own
+// spelling, never the caller's casing — so anything built from it (e.g. a
+// `meta.owner` echo) shows what's actually in the file.
+//
+// Unlike category/account's did-you-mean (top-3 closest by edit distance),
+// the hint here lists every defined owner name outright: with typically
+// only a handful of family members, the whole list is more useful than a
+// fuzzy guess, and it doubles as a quick reminder of what's in the file
+// without having to run `zm owners` first.
+export function resolveOwnerName(ownerNames: string[], filePath: string, owner: string | undefined): string {
   const value = owner ?? 'all'
   if (value === 'all' || value === 'unassigned') return value
-  if (ownerNames.includes(value)) return value
-  const hint = `did you mean: ${suggest(ownerNames, value).join(', ')}`
+  const match = ownerNames.find(n => n.toLowerCase() === value.toLowerCase())
+  if (match !== undefined) return match
+  const defines = ownerNames.length > 0 ? `defines: ${ownerNames.join(', ')}` : 'defines no owners'
+  const hint = `owners.yaml (${filePath}) ${defines}; also accepted: all, unassigned`
   throw new ZmError('INVALID_ARGS', `unknown owner: ${value}`, hint)
 }
 
@@ -213,7 +225,7 @@ export function applyFilters(ds: Dataset, f: Filters, resolved?: ResolvedRefs): 
   // owners.yaml present -> name/unassigned/all semantics on Tx.owner;
   // absent -> today's ZenMoney-user (me/login/id) semantics on Tx.ownerId.
   const ownerIds = ds.ownerNames === null ? resolveOwner(ds, f.owner) : null
-  const ownerName = ds.ownerNames !== null ? resolveOwnerName(ds.ownerNames, f.owner) : null
+  const ownerName = ds.ownerNames !== null ? resolveOwnerName(ds.ownerNames, ds.ownersPath ?? 'owners.yaml', f.owner) : null
   const currency = f.currency?.trim().toLowerCase()
   const search = f.search?.trim().toLowerCase()
 

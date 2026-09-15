@@ -33,6 +33,15 @@ export interface Dataset {
   // name/unassigned semantics. Non-null (even if empty) once the file exists.
   ownerNames: string[] | null
   ownerOf: Map<string, string> // accountId -> owner name, from owners.yaml; empty when ownerNames is null
+  // The owners.yaml path used to resolve `ownerNames`/`ownerOf` above, for
+  // error/hint messages (see resolveOwnerName) — null exactly when
+  // ownerNames is null.
+  ownersPath: string | null
+  // Non-fatal owners.yaml issues surfaced by matchOwners (currently: a
+  // conflict on an archived-only account, resolved as unassigned instead of
+  // failing the command) — every command that opens a Dataset merges these
+  // into its own `warnings` output. Empty when ownerNames is null.
+  ownerWarnings: string[]
 }
 
 export const NO_CATEGORY = 'Uncategorized'
@@ -83,15 +92,20 @@ function topCategoryIdOf(tagId: string | null, tags: Map<string, ZmTag>): string
 // loadOwnersFile), or null/omitted when the family has no owners.yaml at
 // all — every CLI command that opens a Dataset loads it once from
 // ctx.paths.configDir and passes it through here, rather than this function
-// touching the filesystem itself.
-export function loadDataset(store: Store, ownersFile: OwnersFile | null = null): Dataset {
+// touching the filesystem itself. `ownersPath` is that same file's path,
+// used only for error/hint text (see Dataset.ownersPath); it's ignored
+// when `ownersFile` is null, and defaults to a generic 'owners.yaml' so
+// tests that build a Dataset directly from a parsed OwnersFile don't also
+// need to invent a fake path.
+export function loadDataset(store: Store, ownersFile: OwnersFile | null = null, ownersPath: string | null = 'owners.yaml'): Dataset {
   const users = store.all('user')
   const accounts = new Map(store.all('account').map(a => [a.id, a]))
   const tags = new Map(store.all('tag').map(t => [t.id, t]))
   const instruments = new Map(store.all('instrument').map(i => [i.id, i]))
   const merchants = new Map(store.all('merchant').map(m => [m.id, m]))
   const ownerNames = ownersFile ? [...ownersFile.owners.keys()] : null
-  const ownerOf = ownersFile ? matchOwners(accounts, ownersFile) : new Map<string, string>()
+  const ownerMatch = ownersFile ? matchOwners(accounts, ownersFile) : { ownerOf: new Map<string, string>(), warnings: [] }
+  const ownerOf = ownerMatch.ownerOf
 
   const txs: Tx[] = []
   for (const t of store.all('transaction')) {
@@ -184,7 +198,11 @@ export function loadDataset(store: Store, ownersFile: OwnersFile | null = null):
 
   txs.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))
 
-  return { users, accounts, tags, instruments, txs, ownerNames, ownerOf }
+  return {
+    users, accounts, tags, instruments, txs, ownerNames, ownerOf,
+    ownersPath: ownersFile ? ownersPath : null,
+    ownerWarnings: ownerMatch.warnings,
+  }
 }
 
 // Spend = expense and refund txs (income/transfer/debt are never "spend").

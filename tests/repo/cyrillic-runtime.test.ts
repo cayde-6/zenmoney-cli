@@ -42,7 +42,7 @@ function dataset(): Dataset {
     ['ru', tag('ru', cyrillicTitle)],
     ['en', tag('en', 'Apples')],
   ])
-  return { users: [], accounts: new Map(), tags, instruments: new Map(), txs: [], ownerNames: null, ownerOf: new Map() }
+  return { users: [], accounts: new Map(), tags, instruments: new Map(), txs: [], ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [] }
 }
 
 it('resolves a Cyrillic category by exact title, case-insensitively', () => {

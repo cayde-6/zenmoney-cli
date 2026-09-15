@@ -167,7 +167,7 @@ it('meUser throws NO_CACHE when the dataset has no main user', () => {
   const noMainUser: Dataset = {
     users: [{ id: 1, login: 'x', currency: 3, parent: 99, changed: 0 }],
     accounts: new Map(), tags: new Map(), instruments: new Map(), txs: [],
-    ownerNames: null, ownerOf: new Map(),
+    ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [],
   }
   expect(() => meUser(noMainUser)).toThrow(expect.objectContaining({ code: 'NO_CACHE' }))
 })
