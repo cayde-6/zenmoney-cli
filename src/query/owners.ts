@@ -78,6 +78,11 @@ export function parseOwnersFile(text: string, source: string): OwnersFile {
   }
 
   const owners = new Map<string, string[]>()
+  // Tracks the file's own spelling of each name seen so far, by its
+  // lowercased form — `--owner` matches case-insensitively (resolveOwnerName
+  // in query/filters.ts), so two names differing only by case would be
+  // genuinely ambiguous to resolve, not just a style nit.
+  const seenByLowerCase = new Map<string, string>()
   if ('owners' in raw && raw.owners !== null && raw.owners !== undefined) {
     const rawOwners = raw.owners
     if (!isPlainObject(rawOwners)) throw new ZmError('INVALID_ARGS', `${source}: "owners" must be an object`)
@@ -96,6 +101,12 @@ export function parseOwnersFile(text: string, source: string): OwnersFile {
       if (RESERVED_OWNER_NAMES.has(name)) {
         throw new ZmError('INVALID_ARGS', `${source}: owner name "${name}" is reserved`)
       }
+      const lower = name.toLowerCase()
+      const existing = seenByLowerCase.get(lower)
+      if (existing !== undefined) {
+        throw new ZmError('INVALID_ARGS', `${source}: owner names "${existing}" and "${name}" differ only by case`, '--owner matches names case-insensitively; use one spelling')
+      }
+      seenByLowerCase.set(lower, name)
       if (!isPlainObject(value)) {
         throw new ZmError('INVALID_ARGS', `${source}: owner "${name}" must be an object`)
       }
@@ -141,8 +152,14 @@ export function loadOwnersFile(configDir: string): OwnersFile | null {
 // cosmetic (selects the emoji-style glyph), not part of the character's
 // identity.
 const VARIATION_SELECTOR_16 = String.fromCodePoint(0xfe0f)
+const KEYCAP_COMBINING_MARK = String.fromCodePoint(0x20e3)
 const LETTER_OR_DIGIT_RE = /[\p{L}\p{N}]/u
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+// A "keycap" emoji sequence: a digit (or `#`/`*`) + optional U+FE0F + the
+// combining enclosing keycap mark (e.g. "1️⃣"). Built via `new RegExp` from
+// code-point strings, not a `/…/` literal containing an escaped Unicode
+// character, so this source file never risks embedding an actual invisible
+// character in place of the intended escape.
+const KEYCAP_SEQUENCE_RE = new RegExp(`[0-9#*]${VARIATION_SELECTOR_16}?${KEYCAP_COMBINING_MARK}`, 'gu')
 
 // NFC-normalizes and strips every U+FE0F from both sides before any
 // comparison, so an entry/title differing only by that invisible selector
@@ -152,19 +169,36 @@ function normalizeMatchText(s: string): string {
   return s.trim().normalize('NFC').split(VARIATION_SELECTOR_16).join('')
 }
 
+// Intl.Segmenter is constructed fresh on every call, rather than once at
+// module load (or cached in a module-level singleton): a small-ICU Node
+// build that lacks it must still work for every owners.yaml with no
+// emoji/symbol entries at all, failing only when one is actually matched —
+// and only right here, with a clear message, instead of a raw exception
+// (or an import-time crash that would break every command, even ones that
+// never touch owners.yaml).
 function graphemes(s: string): string[] {
-  return [...graphemeSegmenter.segment(s)].map(g => g.segment)
+  let segmenter: Intl.Segmenter
+  try {
+    segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  } catch {
+    throw new ZmError('UNEXPECTED', 'this Node build lacks Intl.Segmenter (full ICU required) for emoji owner entries')
+  }
+  return [...segmenter.segment(s)].map(g => g.segment)
 }
 
-// How many Unicode letters/digits a (trimmed) entry contains — 0 means a
-// bare emoji/symbol entry (matched only by whole grapheme clusters, see
-// entryMatchesAccount below); `zm owners`' "matches more than half of all
-// accounts" warning uses this to skip symbol-only entries entirely (they
-// can't over-match by accident, since they require an exact whole-cluster
-// match) and to only flag a short text entry (a couple of letters/digits),
-// not a longer one that happens to legitimately match a lot of accounts.
+// How many Unicode letters/digits a (trimmed) entry contains, EXCLUDING any
+// that are only part of a keycap emoji sequence (e.g. the "1" in "1️⃣") —
+// a keycap reads as one emoji character, not text, even though it contains
+// a digit code point. 0 means a symbol/emoji entry (matched only by whole
+// grapheme clusters, see entryMatchesAccount below); `zm owners`' "matches
+// more than half of all accounts" warning uses this to skip symbol-only
+// entries entirely (they can't over-match by accident, since they require
+// an exact whole-cluster match) and to only flag a short text entry (a
+// couple of letters/digits), not a longer one that happens to legitimately
+// match a lot of accounts.
 export function letterOrDigitCount(entry: string): number {
-  return [...entry.trim()].filter(ch => LETTER_OR_DIGIT_RE.test(ch)).length
+  const withoutKeycaps = entry.trim().replace(KEYCAP_SEQUENCE_RE, '')
+  return [...withoutKeycaps].filter(ch => LETTER_OR_DIGIT_RE.test(ch)).length
 }
 
 // Whether `needle` (already split into graphemes) appears as a contiguous,
@@ -181,15 +215,17 @@ function graphemeSequenceMatches(needle: string[], haystack: string[]): boolean 
 
 // An entry matches an account if it equals the account id exactly, or
 // matches the account's (trimmed) title. Title matching has two modes:
-//   - an entry containing at least one letter or digit is a plain
+//   - an entry containing at least one letter or digit NOT part of a
+//     keycap emoji sequence (see letterOrDigitCount) is a plain
 //     case-insensitive substring match (today's behavior, unchanged);
-//   - an entry with NO letters or digits at all (a bare emoji/symbol) must
-//     instead align to whole Unicode grapheme-cluster boundaries in the
-//     title (via Intl.Segmenter) — so a bare "man" emoji does not match
-//     inside a "man+ZWJ+woman" family cluster, and a skin-toned emoji only
-//     matches by its full sequence, never by its bare base emoji. Users
-//     should copy the exact emoji from the account title (as `zm owners`
-//     prints it) rather than retyping it from scratch.
+//   - an entry with no such letter/digit (a bare emoji/symbol, keycaps
+//     included) must instead align to whole Unicode grapheme-cluster
+//     boundaries in the title (via Intl.Segmenter) — so a bare "man" emoji
+//     does not match inside a "man+ZWJ+woman" family cluster, a skin-toned
+//     emoji only matches by its full sequence, never its bare base emoji,
+//     and a keycap digit ("1️⃣") is never treated as if it were the plain
+//     text "1". Users should copy the exact emoji from the account title
+//     (as `zm owners` prints it) rather than retyping it from scratch.
 // Both sides are NFC-normalized and stripped of U+FE0F (variation
 // selector-16) first, so a title/entry differing only by that invisible
 // selector still matches.
@@ -198,7 +234,7 @@ export function entryMatchesAccount(entry: string, account: ZmAccount): boolean 
   const trimmedEntry = entry.trim()
   if (trimmedEntry === '') return false
 
-  if (LETTER_OR_DIGIT_RE.test(trimmedEntry)) {
+  if (letterOrDigitCount(trimmedEntry) > 0) {
     const q = normalizeMatchText(trimmedEntry).toLowerCase()
     if (q === '') return false
     return normalizeMatchText(account.title).toLowerCase().includes(q)
@@ -209,13 +245,24 @@ export function entryMatchesAccount(entry: string, account: ZmAccount): boolean 
   return graphemeSequenceMatches(graphemes(normEntry), graphemes(normTitle))
 }
 
+export interface OwnerConflict { id: string; title: string; owners: string[] }
+
 export interface OwnerMatchResult {
   ownerOf: Map<string, string> // accountId -> owner name
-  // Non-fatal issues found while matching — currently just an archived
-  // account whose conflict was resolved as unassigned instead of failing
-  // the whole command (see below).
+  // Non-fatal issues found while matching: an archived-account conflict
+  // (always, resolved as unassigned) and, in conflictMode 'collect' only, a
+  // non-archived conflict too (see `conflicts` below).
   warnings: string[]
+  // Non-archived conflicts, populated only in conflictMode 'collect' — in
+  // 'throw' mode (the default) a non-archived conflict throws instead, so
+  // this is always empty there. `zm owners` is the one caller that passes
+  // 'collect': it's the diagnostic tool every other command's conflict
+  // error hints at, so it has to be able to report a conflict as data
+  // instead of failing itself.
+  conflicts: OwnerConflict[]
 }
+
+export type OwnerConflictMode = 'throw' | 'collect'
 
 function joinNames(names: string[]): string {
   if (names.length <= 1) return names.join('')
@@ -233,14 +280,18 @@ function joinNames(names: string[]): string {
 // match (no conflict in that case) — an id is unambiguous by construction,
 // so there's nothing to arbitrate. A genuine conflict (two owners both
 // matching by id, or neither matching by id) is a configuration error on a
-// non-archived account (INVALID_ARGS, naming the account and every
-// matching owner) — but on an ARCHIVED account it's downgraded to a
-// warning and the account is treated as unassigned instead, so a stale
-// closed account's leftover title overlap can never break every other
-// command that opens the cache.
-export function matchOwners(accounts: Map<string, ZmAccount>, file: OwnersFile): OwnerMatchResult {
+// non-archived account: by default (conflictMode 'throw') that's
+// INVALID_ARGS, naming the account and every matching owner, hinting at
+// `zm owners` — but with conflictMode 'collect', it's added to `conflicts`
+// and a warning instead of thrown, and the account is treated as
+// unassigned (like an archived conflict already was). On an ARCHIVED
+// account it's *always* downgraded to a warning and the account is treated
+// as unassigned instead, so a stale closed account's leftover title
+// overlap can never break every other command that opens the cache.
+export function matchOwners(accounts: Map<string, ZmAccount>, file: OwnersFile, conflictMode: OwnerConflictMode = 'throw'): OwnerMatchResult {
   const ownerOf = new Map<string, string>()
   const warnings: string[] = []
+  const conflicts: OwnerConflict[] = []
 
   for (const account of accounts.values()) {
     const exactOwners: string[] = []
@@ -266,14 +317,17 @@ export function matchOwners(accounts: Map<string, ZmAccount>, file: OwnersFile):
     // winners.length >= 2: a genuine conflict.
     if (account.archive) {
       warnings.push(`account "${account.title}" (${account.id}) matches owners ${joinNames(winners)}; treated as unassigned`)
+    } else if (conflictMode === 'collect') {
+      conflicts.push({ id: account.id, title: account.title, owners: winners })
+      warnings.push(`account "${account.title}" (${account.id}) matches owners ${joinNames(winners)}`)
     } else {
       throw new ZmError(
         'INVALID_ARGS',
         `account "${account.title}" (${account.id}) matches owners ${joinNames(winners)}`,
-        'pin it to one owner by account id, see zm owners --archived',
+        'pin it to one owner by account id; run zm owners to see all conflicts',
       )
     }
   }
 
-  return { ownerOf, warnings }
+  return { ownerOf, warnings, conflicts }
 }

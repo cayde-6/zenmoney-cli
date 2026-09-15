@@ -2,7 +2,7 @@ import { it, expect } from 'vitest'
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { parseOwnersFile, loadOwnersFile, ownersFilePath, matchOwners, entryMatchesAccount } from '../../src/query/owners.js'
+import { parseOwnersFile, loadOwnersFile, ownersFilePath, matchOwners, entryMatchesAccount, letterOrDigitCount } from '../../src/query/owners.js'
 import type { ZmAccount } from '../../src/api/types.js'
 
 function account(id: string, title: string, over: Partial<ZmAccount> = {}): ZmAccount {
@@ -23,6 +23,8 @@ const MERMAID = String.fromCodePoint(0x1f9dc)
 const SKIN_LIGHT = String.fromCodePoint(0x1f3fb)
 const FEMALE_SIGN = String.fromCodePoint(0x2640)
 const MERMAID_LIGHT_FEMALE = MERMAID + SKIN_LIGHT + ZWJ + FEMALE_SIGN + FE0F // one grapheme cluster
+const KEYCAP_MARK = String.fromCodePoint(0x20e3) // combining enclosing keycap
+const KEYCAP_ONE = '1' + FE0F + KEYCAP_MARK // "1️⃣" — a keycap digit sequence
 
 it('parses a well-formed owners file', () => {
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card Alex", "acc-id-123"]\n  sam:\n    accounts: ["Sam"]\n', 'owners.yaml')
@@ -88,6 +90,15 @@ it('rejects a bare numeric owner key (yaml resolves it to a number, not a string
     expect.objectContaining({ code: 'INVALID_ARGS' }),
   )
 })
+// Review round follow-up item 4: two owner names differing only by case are
+// ambiguous once --owner matches case-insensitively (see resolveOwnerName)
+// — reject the file outright rather than silently letting one shadow the
+// other depending on Map iteration order.
+it('rejects two owner names that are equal case-insensitively', () => {
+  expect(() => parseOwnersFile('owners:\n  Alex:\n    accounts: [a]\n  alex:\n    accounts: [b]\n', 'owners.yaml')).toThrow(
+    expect.objectContaining({ code: 'INVALID_ARGS' }),
+  )
+})
 it('rejects an "owners" value that is not an object', () => {
   expect(() => parseOwnersFile('owners: nope\n', 'owners.yaml')).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
 })
@@ -148,7 +159,7 @@ it('matchOwners: an account matched by no entry is left out (unassigned)', () =>
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card Alex"]\n', 'owners.yaml')
   expect(matchOwners(accounts, file).ownerOf.size).toBe(0)
 })
-it('matchOwners: an account matched by two different owners (non-archived) is a conflict error naming both, with a pin-by-id hint', () => {
+it('matchOwners: an account matched by two different owners (non-archived) is a conflict error naming both, with a pin-by-id hint pointing to zm owners', () => {
   const accounts = new Map([['acc-1', account('acc-1', 'Shared Card')]])
   const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Shared"]\n  sam:\n    accounts: ["Card"]\n', 'owners.yaml')
   try {
@@ -160,8 +171,38 @@ it('matchOwners: an account matched by two different owners (non-archived) is a 
     expect(e.message).toContain('acc-1')
     expect(e.message).toContain('alex')
     expect(e.message).toContain('sam')
-    expect(e.hint).toBe('pin it to one owner by account id, see zm owners --archived')
+    // Review round follow-up item 1: `zm owners` is the diagnostic tool that
+    // handles this without failing (see the 'collect' conflictMode tests
+    // below) — every other command's hint now points there.
+    expect(e.hint).toBe('pin it to one owner by account id; run zm owners to see all conflicts')
   }
+})
+// Review round follow-up item 1: `zm owners` passes conflictMode: 'collect'
+// so it can report a non-archived conflict as data instead of failing —
+// it's the diagnostic tool the default 'throw' mode's hint points to.
+it('matchOwners with conflictMode "collect": a non-archived conflict does not throw, is listed in conflicts, left unassigned, and warned about', () => {
+  const accounts = new Map([['acc-1', account('acc-1', 'Shared Card')]])
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Shared"]\n  sam:\n    accounts: ["Card"]\n', 'owners.yaml')
+  const { ownerOf, warnings, conflicts } = matchOwners(accounts, file, 'collect')
+  expect(ownerOf.has('acc-1')).toBe(false)
+  expect(conflicts).toEqual([{ id: 'acc-1', title: 'Shared Card', owners: ['alex', 'sam'] }])
+  expect(warnings.some(w => w.includes('Shared Card') && w.includes('acc-1'))).toBe(true)
+})
+it('matchOwners with conflictMode "collect": an archived conflict still behaves as before (warning, unassigned, empty conflicts)', () => {
+  const accounts = new Map([['acc-1', account('acc-1', 'Shared Card', { archive: true })]])
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Shared"]\n  sam:\n    accounts: ["Card"]\n', 'owners.yaml')
+  const { ownerOf, warnings, conflicts } = matchOwners(accounts, file, 'collect')
+  expect(ownerOf.has('acc-1')).toBe(false)
+  expect(conflicts).toEqual([])
+  expect(warnings).toEqual(['account "Shared Card" (acc-1) matches owners alex and sam; treated as unassigned'])
+})
+// The default (no third argument) stays 'throw', unchanged — every existing
+// caller (loadDataset for every command except `zm owners`) keeps failing
+// hard on a non-archived conflict.
+it('matchOwners defaults to conflictMode "throw" with no third argument', () => {
+  const accounts = new Map([['acc-1', account('acc-1', 'Shared Card')]])
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Shared"]\n  sam:\n    accounts: ["Card"]\n', 'owners.yaml')
+  expect(() => matchOwners(accounts, file)).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
 })
 it('matchOwners: two entries of the SAME owner both matching the same account is not a conflict', () => {
   const accounts = new Map([['acc-1', account('acc-1', 'Card Alex')]])
@@ -239,4 +280,56 @@ it('entryMatchesAccount exposes the same matching rule matchOwners uses internal
   expect(entryMatchesAccount('card', account('acc-1', 'Some Card'))).toBe(true)
   expect(entryMatchesAccount('nope', account('acc-1', 'Some Card'))).toBe(false)
   expect(entryMatchesAccount(HEART, account('acc-1', `${HEART}${FE0F} Card`))).toBe(true)
+})
+
+// --- Keycap emoji classification (review round follow-up item 8) ---
+// A keycap sequence (digit/#/* + optional U+FE0F + U+20E3) contains a
+// letter/digit code point, but the whole sequence reads as one emoji
+// character, not text — it must be classified (and matched) as a
+// symbol/grapheme entry, not a substring-matched text entry.
+it('letterOrDigitCount ignores a digit that is only part of a keycap sequence', () => {
+  expect(letterOrDigitCount(KEYCAP_ONE)).toBe(0)
+  expect(letterOrDigitCount('1')).toBe(1) // a bare digit (no keycap mark) still counts
+  expect(letterOrDigitCount(`a${KEYCAP_ONE}`)).toBe(1) // a real letter alongside a keycap still counts
+})
+it('a keycap entry is matched by whole-grapheme alignment, not as a substring text match', () => {
+  const withKeycap = new Map([['acc-1', account('acc-1', `${KEYCAP_ONE} Card`)]])
+  const file = parseOwnersFile(`owners:\n  alex:\n    accounts: ["${KEYCAP_ONE}"]\n`, 'owners.yaml')
+  expect(matchOwners(withKeycap, file).ownerOf.get('acc-1')).toBe('alex')
+  // A title with only the bare digit (no keycap marks at all) is a
+  // DIFFERENT grapheme cluster ("1" alone vs. the full "1️⃣" cluster) — if
+  // the keycap entry were instead treated as text and substring-matched,
+  // this would incorrectly match too.
+  const withBareDigit = new Map([['acc-2', account('acc-2', '1 Card')]])
+  expect(matchOwners(withBareDigit, file).ownerOf.size).toBe(0)
+})
+
+// --- Lazy Intl.Segmenter (review round follow-up item 7) ---
+// Intl.Segmenter is only ever constructed when an emoji/symbol entry is
+// actually matched — a plain text-only owners.yaml must keep working even
+// on a Node build that lacks it (e.g. a small-ICU build), and a clear
+// ZmError, not a raw exception, must surface when it's genuinely needed
+// and unavailable.
+it('a text-only entry never touches Intl.Segmenter, even if it would throw', () => {
+  const original = Intl.Segmenter
+  ;(Intl as any).Segmenter = function () { throw new Error('no full-ICU Intl.Segmenter') }
+  try {
+    expect(entryMatchesAccount('Card', account('acc-1', 'Some Card'))).toBe(true)
+  } finally {
+    (Intl as any).Segmenter = original
+  }
+})
+it('throws a clear UNEXPECTED ZmError when Intl.Segmenter is unavailable and an emoji entry is actually matched', () => {
+  const original = Intl.Segmenter
+  ;(Intl as any).Segmenter = function () { throw new Error('no full-ICU Intl.Segmenter') }
+  try {
+    expect(() => entryMatchesAccount(HEART, account('acc-1', 'Some Card'))).toThrow(
+      expect.objectContaining({
+        code: 'UNEXPECTED',
+        message: 'this Node build lacks Intl.Segmenter (full ICU required) for emoji owner entries',
+      }),
+    )
+  } finally {
+    (Intl as any).Segmenter = original
+  }
 })

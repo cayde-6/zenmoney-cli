@@ -39,6 +39,20 @@ it('with owners.yaml, Tx.owner is the owner of the primary-side account, and Dat
   expect(d.txs.find(t => t.id === 't2')!.owner).toBe('sam') // primary account acc-partner
   expect(d.txs.find(t => t.id === 't3')!.owner).toBeNull() // primary account acc-eur, unassigned
 })
+// Review round follow-up item 1: `zm owners` needs conflictMode 'collect'
+// forwarded all the way through loadDataset to matchOwners, so it can
+// report a non-archived conflict as data instead of the command failing.
+it('loadDataset forwards conflictMode "collect" to matchOwners: a non-archived conflict is reported via ownerConflicts, not thrown', () => {
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card"]\n  sam:\n    accounts: ["PLN"]\n', 'owners.yaml')
+  const d = loadDataset(fixtureStore(), file, 'owners.yaml', 'collect')
+  expect(d.ownerConflicts).toEqual([{ id: 'acc-pln', title: 'Card PLN', owners: ['alex', 'sam'] }])
+  expect(d.ownerOf.has('acc-pln')).toBe(false)
+  expect(d.txs.find(t => t.id === 't1')!.owner).toBeNull() // primary account acc-pln, unassigned due to conflict
+})
+it('loadDataset defaults to conflictMode "throw" (every command except zm owners)', () => {
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card"]\n  sam:\n    accounts: ["PLN"]\n', 'owners.yaml')
+  expect(() => loadDataset(fixtureStore(), file)).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
+})
 it('normalises a whitespace-only comment to null', () => {
   const s = Store.memory()
   const diff = fixtureDiff()
@@ -167,7 +181,7 @@ it('meUser throws NO_CACHE when the dataset has no main user', () => {
   const noMainUser: Dataset = {
     users: [{ id: 1, login: 'x', currency: 3, parent: 99, changed: 0 }],
     accounts: new Map(), tags: new Map(), instruments: new Map(), txs: [],
-    ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [],
+    ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [], ownerConflicts: [],
   }
   expect(() => meUser(noMainUser)).toThrow(expect.objectContaining({ code: 'NO_CACHE' }))
 })

@@ -1,6 +1,6 @@
 import { it, expect } from 'vitest'
 import { loadDataset, type Dataset } from '../../src/query/model.js'
-import { applyFilters, resolveAccount, resolveCategory, resolveFilterRefs, resolveOwner, resolveOwnerName, resolvePeriod, usedCurrencies } from '../../src/query/filters.js'
+import { applyFilters, ownerMetaValue, resolveAccount, resolveCategory, resolveFilterRefs, resolveOwner, resolveOwnerName, resolvePeriod, usedCurrencies } from '../../src/query/filters.js'
 import { parseOwnersFile } from '../../src/query/owners.js'
 import type { ZmAccount } from '../../src/api/types.js'
 import { fixtureStore } from '../helpers.js'
@@ -12,7 +12,7 @@ const ids = (f: any) => applyFilters(ds, f).map(t => t.id).sort()
 // to exercise exact-vs-substring priority; the fixture's account titles don't
 // happen to overlap that way.
 function accountDataset(accounts: ZmAccount[]): Dataset {
-  return { users: ds.users, accounts: new Map(accounts.map(a => [a.id, a])), tags: ds.tags, instruments: ds.instruments, txs: [], ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [] }
+  return { users: ds.users, accounts: new Map(accounts.map(a => [a.id, a])), tags: ds.tags, instruments: ds.instruments, txs: [], ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [], ownerConflicts: [] }
 }
 function account(id: string, title: string): ZmAccount {
   return { id, user: 10, instrument: 100, type: 'cash', title, balance: 0, inBalance: true, archive: false, changed: 0 }
@@ -40,7 +40,7 @@ it('category includes children and matches by leaf title', () => {
 it('resolveCategory: duplicate full-path match is ambiguous', () => {
   const dupTags = new Map(ds.tags)
   dupTags.set('food2', { id: 'food2', user: 10, title: 'Groceries', parent: null, showIncome: false, showOutcome: true, changed: 0 })
-  const dupDs: Dataset = { users: ds.users, accounts: ds.accounts, tags: dupTags, instruments: ds.instruments, txs: [], ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [] }
+  const dupDs: Dataset = { users: ds.users, accounts: ds.accounts, tags: dupTags, instruments: ds.instruments, txs: [], ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [], ownerConflicts: [] }
   try { resolveCategory(dupDs, 'Groceries'); throw new Error('no throw') }
   catch (e: any) {
     expect(e.code).toBe('INVALID_ARGS')
@@ -100,6 +100,19 @@ it('resolveOwnerName hint says so when owners.yaml defines no owners at all', ()
   catch (e: any) {
     expect(e.hint).toBe('owners.yaml (/x/owners.yaml) defines no owners; also accepted: all, unassigned')
   }
+})
+// Review round follow-up item 3: meta.owner should echo the resolved FILE
+// spelling once owners.yaml exists, not the caller's raw casing — and stay
+// the raw value unchanged with no owners.yaml (today's behavior).
+it('ownerMetaValue echoes the resolved file spelling once owners.yaml exists, else the raw value unchanged', () => {
+  const file = parseOwnersFile('owners:\n  alex:\n    accounts: ["Card PLN"]\n', 'owners.yaml')
+  const dsWithFile = loadDataset(fixtureStore(), file)
+  expect(ownerMetaValue(dsWithFile, 'ALEX')).toBe('alex')
+  expect(ownerMetaValue(dsWithFile, undefined)).toBe('all')
+  expect(ownerMetaValue(dsWithFile, 'unassigned')).toBe('unassigned')
+
+  expect(ownerMetaValue(ds, 'me')).toBe('me') // no owners.yaml: unchanged, raw value
+  expect(ownerMetaValue(ds, undefined)).toBe('all')
 })
 // Once owners.yaml exists, --owner switches from ZenMoney-user semantics
 // (me/login/id) to name/unassigned/all semantics, driven by Tx.owner rather

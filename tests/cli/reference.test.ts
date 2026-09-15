@@ -46,6 +46,23 @@ it('users --owner all (the default) still works once owners.yaml exists', async 
   expect(code).toBe(0)
   expect(t.json().data).toHaveLength(2)
 })
+// Review round follow-up item 5: `zm users` must read owners.yaml only when
+// --owner isn't 'all' — so a broken owners.yaml can never break the
+// default, most common invocation, which never even considers file owner
+// names in the first place.
+it('users with --owner all (default) never reads owners.yaml — a broken file does not break it', async () => {
+  const t = seededContext()
+  withOwnersFile(t, 'owners:\n  alex: [1, 2\n') // invalid yaml
+  const code = await run(['node', 'zm', 'users'], t.ctx)
+  expect(code).toBe(0)
+})
+it('users with a non-all --owner DOES read owners.yaml, surfacing a broken file', async () => {
+  const t = seededContext()
+  withOwnersFile(t, 'owners:\n  alex: [1, 2\n') // invalid yaml
+  const code = await run(['node', 'zm', 'users', '--owner', 'partner'], t.ctx)
+  expect(code).toBe(2)
+  expect(t.errJson().error.code).toBe('INVALID_ARGS')
+})
 it('categories rejects a non-all --owner', async () => {
   const { code, t } = await zm(['categories', '--owner', 'me'])
   expect(code).toBe(2)
@@ -118,6 +135,14 @@ it('tx --owner <name> filters transactions by owners.yaml owner name', async () 
   expect(await run(['node', 'zm', 'tx', '--month', '2026-09', '--owner', 'sam'], t.ctx)).toBe(0)
   expect(t.json().data.map((x: any) => x.id)).toEqual(['t2'])
   expect(t.json().data[0].owner).toBe('sam')
+})
+// Review round follow-up item 3: meta.owner echoes the file's own spelling
+// once owners.yaml exists, not the caller's casing.
+it('tx meta.owner echoes the resolved file spelling once owners.yaml exists (e.g. --owner ALEX -> "alex")', async () => {
+  const t = seededContext()
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  expect(await run(['node', 'zm', 'tx', '--month', '2026-09', '--owner', 'ALEX'], t.ctx)).toBe(0)
+  expect(t.json().meta.owner).toBe('alex')
 })
 it('zm owners: no file returns an empty owners list, all non-archived accounts unassigned, and a hint warning', async () => {
   const { t } = await zm(['owners'])
@@ -229,7 +254,7 @@ it('a non-archived account matched by two different owners exits 2 with a pin-by
   expect(t.errJson().error.code).toBe('INVALID_ARGS')
   expect(t.errJson().error.message).toContain('Card PLN')
   expect(t.errJson().error.message).toContain('acc-pln')
-  expect(t.errJson().error.hint).toBe('pin it to one owner by account id, see zm owners --archived')
+  expect(t.errJson().error.hint).toBe('pin it to one owner by account id; run zm owners to see all conflicts')
 })
 it('a conflict on an archived-only account is a warning, and the command still succeeds', async () => {
   const t = seededContext()
@@ -241,6 +266,29 @@ it('a conflict on an archived-only account is a warning, and the command still s
   expect(t.json().data.find((a: any) => a.id === 'acc-old').owner).toBeNull() // treated as unassigned
   expect(t.json().data.find((a: any) => a.id === 'acc-eur').owner).toBe('sam')
   expect(t.json().warnings).toContain('account "Old Cash" (acc-old) matches owners alex and sam; treated as unassigned')
+})
+// Review round follow-up item 1: `zm owners` is the diagnostic tool every
+// other command's conflict hint points to — it must not itself fail on a
+// non-archived conflict, or there'd be no way to see it via the CLI.
+it('zm owners: a non-archived conflict does not fail the command — it is reported via data.conflicts and a warning, exit 0', async () => {
+  const t = seededContext()
+  withOwnersFile(t, 'owners:\n  alex:\n    accounts: ["Card"]\n  sam:\n    accounts: ["PLN"]\n')
+  const code = await run(['node', 'zm', 'owners'], t.ctx)
+  expect(code).toBe(0)
+  const data = t.json().data
+  expect(data.conflicts).toEqual([{ id: 'acc-pln', title: 'Card PLN', owners: ['alex', 'sam'] }])
+  // The conflicted account must not ALSO show up under any owner or unassigned.
+  expect(data.owners.every((o: any) => !o.accounts.some((a: any) => a.id === 'acc-pln'))).toBe(true)
+  expect(data.unassigned.some((a: any) => a.id === 'acc-pln')).toBe(false)
+  expect(t.json().warnings.some((w: string) => w.includes('Card PLN') && w.includes('acc-pln'))).toBe(true)
+})
+it('zm owners: the same non-archived conflict still exits 2 (INVALID_ARGS) from every other owner-aware command', async () => {
+  const t = seededContext()
+  withOwnersFile(t, 'owners:\n  alex:\n    accounts: ["Card"]\n  sam:\n    accounts: ["PLN"]\n')
+  for (const args of [['accounts'], ['tx']]) {
+    const code = await run(['node', 'zm', ...args], t.ctx)
+    expect(code).toBe(2)
+  }
 })
 
 // Review round item 9: a broken (directory/unreadable) owners.yaml.

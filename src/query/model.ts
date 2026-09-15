@@ -1,7 +1,7 @@
 import type { Store } from '../store/store.js'
 import type { ZmAccount, ZmInstrument, ZmTag, ZmTransaction, ZmUser } from '../api/types.js'
 import { ZmError } from '../errors.js'
-import { matchOwners, type OwnersFile } from './owners.js'
+import { matchOwners, type OwnerConflict, type OwnerConflictMode, type OwnersFile } from './owners.js'
 
 export type TxType = 'expense' | 'income' | 'refund' | 'transfer' | 'debt'
 
@@ -37,11 +37,17 @@ export interface Dataset {
   // error/hint messages (see resolveOwnerName) — null exactly when
   // ownerNames is null.
   ownersPath: string | null
-  // Non-fatal owners.yaml issues surfaced by matchOwners (currently: a
-  // conflict on an archived-only account, resolved as unassigned instead of
-  // failing the command) — every command that opens a Dataset merges these
-  // into its own `warnings` output. Empty when ownerNames is null.
+  // Non-fatal owners.yaml issues surfaced by matchOwners (an archived-only
+  // conflict, always; a non-archived conflict too, only when loadDataset was
+  // called with conflictMode 'collect') — every command that opens a
+  // Dataset merges these into its own `warnings` output. Empty when
+  // ownerNames is null.
   ownerWarnings: string[]
+  // Non-archived conflicts, populated only when loadDataset was called with
+  // conflictMode 'collect' (only `zm owners` does) — see
+  // query/owners.ts's matchOwners. Always empty otherwise, including every
+  // other command (conflictMode 'throw', the default, throws instead).
+  ownerConflicts: OwnerConflict[]
 }
 
 export const NO_CATEGORY = 'Uncategorized'
@@ -96,15 +102,19 @@ function topCategoryIdOf(tagId: string | null, tags: Map<string, ZmTag>): string
 // used only for error/hint text (see Dataset.ownersPath); it's ignored
 // when `ownersFile` is null, and defaults to a generic 'owners.yaml' so
 // tests that build a Dataset directly from a parsed OwnersFile don't also
-// need to invent a fake path.
-export function loadDataset(store: Store, ownersFile: OwnersFile | null = null, ownersPath: string | null = 'owners.yaml'): Dataset {
+// need to invent a fake path. `conflictMode` is forwarded to matchOwners —
+// every command except `zm owners` keeps the default 'throw' (a non-archived
+// conflict fails the command); `zm owners` passes 'collect' so it can report
+// a conflict as data (Dataset.ownerConflicts) instead of failing itself,
+// since it's the diagnostic tool every other command's conflict hint points to.
+export function loadDataset(store: Store, ownersFile: OwnersFile | null = null, ownersPath: string | null = 'owners.yaml', conflictMode: OwnerConflictMode = 'throw'): Dataset {
   const users = store.all('user')
   const accounts = new Map(store.all('account').map(a => [a.id, a]))
   const tags = new Map(store.all('tag').map(t => [t.id, t]))
   const instruments = new Map(store.all('instrument').map(i => [i.id, i]))
   const merchants = new Map(store.all('merchant').map(m => [m.id, m]))
   const ownerNames = ownersFile ? [...ownersFile.owners.keys()] : null
-  const ownerMatch = ownersFile ? matchOwners(accounts, ownersFile) : { ownerOf: new Map<string, string>(), warnings: [] }
+  const ownerMatch = ownersFile ? matchOwners(accounts, ownersFile, conflictMode) : { ownerOf: new Map<string, string>(), warnings: [], conflicts: [] }
   const ownerOf = ownerMatch.ownerOf
 
   const txs: Tx[] = []
@@ -202,6 +212,7 @@ export function loadDataset(store: Store, ownersFile: OwnersFile | null = null, 
     users, accounts, tags, instruments, txs, ownerNames, ownerOf,
     ownersPath: ownersFile ? ownersPath : null,
     ownerWarnings: ownerMatch.warnings,
+    ownerConflicts: ownerMatch.conflicts,
   }
 }
 

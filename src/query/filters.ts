@@ -133,6 +133,20 @@ export function resolveOwnerName(ownerNames: string[], filePath: string, owner: 
   throw new ZmError('INVALID_ARGS', `unknown owner: ${value}`, hint)
 }
 
+// The value every command's `meta.owner` should echo: once owners.yaml
+// exists, the file's own spelling (e.g. `--owner ALEX` echoes "alex"), same
+// as what applyFilters actually filtered on — not the caller's raw casing.
+// With no owners.yaml, unchanged: the raw option value (today's
+// me/login/id semantics don't have a single "canonical spelling" to
+// resolve to). Re-resolves via resolveOwnerName rather than caching the
+// result from applyFilters — cheap and pure, and by the time a command
+// builds its `meta`, resolution has already succeeded once, so this can't
+// newly throw.
+export function ownerMetaValue(ds: Dataset, owner: string | undefined): string {
+  if (ds.ownerNames === null) return owner ?? 'all'
+  return resolveOwnerName(ds.ownerNames, ds.ownersPath ?? 'owners.yaml', owner)
+}
+
 // Shared by applyFilters and by any command (e.g. `accounts`) that needs to
 // test a single Tx/account owner name against an already-resolved `--owner`
 // value, without repeating the 'all'/'unassigned' special-casing.

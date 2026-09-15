@@ -2,7 +2,7 @@ import type { Command } from 'commander'
 import type { AppContext } from '../context.js'
 import { addFilterOptions, readFilters, withStore } from '../program.js'
 import { categoryPath, loadDataset, meUser, type TxType } from '../../query/model.js'
-import { applyFilters, currencyWarnings, ownerNameMatches, resolveFilterRefs, resolveOwner, resolveOwnerName, resolvePeriod, usedCurrencies } from '../../query/filters.js'
+import { applyFilters, currencyWarnings, ownerMetaValue, ownerNameMatches, resolveFilterRefs, resolveOwner, resolveOwnerName, resolvePeriod, usedCurrencies } from '../../query/filters.js'
 import { loadOwnersFile, ownersFilePath, entryMatchesAccount, letterOrDigitCount, type OwnersFile } from '../../query/owners.js'
 import { flattenTxTable } from '../output.js'
 import type { TableRow } from '../output.js'
@@ -133,14 +133,18 @@ export function registerReference(program: Command, ctx: AppContext): void {
       // once the file is active, the same way categories/rates reject it
       // outright, rather than silently keeping the old me/login/id semantics
       // as if owners.yaml didn't change anything. Checked before opening the
-      // cache alongside the file read, so it fails the same way regardless
-      // of whether a cache exists.
-      if (loadOwnersFile(ctx.paths.configDir) !== null && cmd.optsWithGlobals().owner !== 'all') {
+      // cache, so it fails the same way regardless of whether a cache
+      // exists. The `owner !== 'all'` check runs FIRST, short-circuiting
+      // `loadOwnersFile` — so the file is read only when it could actually
+      // matter, and a broken owners.yaml can never break the default,
+      // most common `zm users` (no --owner, or --owner all) invocation.
+      const ownerValue = cmd.optsWithGlobals().owner
+      if (ownerValue !== 'all' && loadOwnersFile(ctx.paths.configDir) !== null) {
         throw new ZmError('INVALID_ARGS', '--owner is not supported by users', 'owners.yaml is active; zm users lists ZenMoney users -- use zm owners')
       }
       withStore(ctx, cmd, store => {
         const ds = loadDataset(store)
-        const ownerIds = resolveOwner(ds, cmd.optsWithGlobals().owner)
+        const ownerIds = resolveOwner(ds, ownerValue)
         const data = ds.users
           .filter(u => ownerIds === null || ownerIds.has(u.id))
           .map(u => ({
@@ -206,13 +210,17 @@ export function registerReference(program: Command, ctx: AppContext): void {
       withStore(ctx, cmd, store => {
         const filePath = ownersFilePath(ctx.paths.configDir)
         const ownersFile = loadOwnersFile(ctx.paths.configDir)
-        const ds = loadDataset(store, ownersFile, filePath)
+        // conflictMode 'collect': `zm owners` is the diagnostic tool every
+        // other command's conflict-error hint points to, so a non-archived
+        // conflict must show up here as data (ds.ownerConflicts) instead of
+        // failing this command too — that would leave no way to see it.
+        const ds = loadDataset(store, ownersFile, filePath, 'collect')
         const toRef = (a: ZmAccount): { id: string; title: string } => ({ id: a.id, title: a.title })
         const accountsList = [...ds.accounts.values()].filter(a => opts.archived || !a.archive)
 
         if (ownersFile === null) {
-          const data: { file: string | null; owners: { name: string; accounts: { id: string; title: string }[] }[]; unassigned: { id: string; title: string }[] } =
-            { file: null, owners: [], unassigned: accountsList.map(toRef) }
+          const data: { file: string | null; owners: { name: string; accounts: { id: string; title: string }[] }[]; unassigned: { id: string; title: string }[]; conflicts: typeof ds.ownerConflicts } =
+            { file: null, owners: [], unassigned: accountsList.map(toRef), conflicts: [] }
           return {
             data,
             table: flattenOwnersTable([], accountsList),
@@ -220,18 +228,22 @@ export function registerReference(program: Command, ctx: AppContext): void {
           }
         }
 
+        // Accounts in conflict are reported only via `data.conflicts` — never
+        // also under an owner or in `unassigned`, which would misleadingly
+        // suggest the conflict was actually resolved one way or the other.
+        const conflictIds = new Set(ds.ownerConflicts.map(c => c.id))
         const owners = ds.ownerNames!.map(name => ({
           name,
           accounts: accountsList.filter(a => ds.ownerOf.get(a.id) === name).map(toRef),
         }))
-        const unassigned = accountsList.filter(a => !ds.ownerOf.has(a.id)).map(toRef)
+        const unassigned = accountsList.filter(a => !ds.ownerOf.has(a.id) && !conflictIds.has(a.id)).map(toRef)
         // Every account (archived included — matching itself always
         // considers archived accounts; --archived only ever affects what's
         // *displayed*) is used for these entry-quality warnings, so they
         // don't fluctuate depending on whether --archived was passed.
         const warnings = [...ds.ownerWarnings, ...entryMatchWarnings(ownersFile, [...ds.accounts.values()])]
         return {
-          data: { file: filePath as string | null, owners, unassigned },
+          data: { file: filePath as string | null, owners, unassigned, conflicts: ds.ownerConflicts },
           table: flattenOwnersTable(owners, unassigned),
           ...(warnings.length ? { warnings } : {}),
         }
@@ -314,7 +326,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
             from: period.from,
             to: period.to,
             category: refs.categoryPath,
-            owner: cmd.optsWithGlobals().owner,
+            owner: ownerMetaValue(ds, filters.owner),
             account: refs.accountId,
             currency: filters.currency ?? null,
             type: filters.type ?? null,
