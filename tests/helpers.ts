@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync } from 'node:fs'
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AppContext } from '../src/cli/context.js'
@@ -39,3 +39,18 @@ export function seededContext(over: Partial<AppContext> = {}) {
   s.close()
   return t
 }
+
+// Writes owners.yaml into a context's config dir before the command under
+// test runs against it — shared by every owners.yaml CLI test (reference,
+// analytics, budget, status), since none of them can rely on the file
+// existing before their own command runs.
+export function withOwnersFile(t: { ctx: AppContext }, yaml: string): void {
+  mkdirSync(t.ctx.paths.configDir, { recursive: true })
+  writeFileSync(join(t.ctx.paths.configDir, 'owners.yaml'), yaml)
+}
+
+// A small, synthetic family split matching the shared fixture's accounts
+// (Card PLN -> alex, Card Partner -> sam; Cash EUR/Debts/Old Cash left
+// unassigned), reused across every owners.yaml CLI test that just needs
+// *some* valid file rather than a specific edge case.
+export const FAMILY_OWNERS_YAML = 'owners:\n  alex:\n    accounts: ["Card PLN"]\n  sam:\n    accounts: ["acc-partner"]\n'

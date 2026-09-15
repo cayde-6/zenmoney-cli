@@ -4,7 +4,7 @@ import { addFilterOptions, readFilters, withStore } from '../program.js'
 import { flattenGroups } from '../output.js'
 import { loadDataset } from '../../query/model.js'
 import { applyFilters, currencyWarnings, resolveFilterRefs, resolvePeriod } from '../../query/filters.js'
-import { loadOwnersFile } from '../../query/owners.js'
+import { loadOwnersFile, ownersFilePath } from '../../query/owners.js'
 import { spendBy, incomeBy, type SpendBy } from '../../analytics/spend.js'
 import { compare, parsePeriod } from '../../analytics/compare.js'
 import { findRecurring, recurringWindow } from '../../analytics/recurring.js'
@@ -33,7 +33,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
       const period = resolvePeriod(filters)
 
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir), ownersFilePath(ctx.paths.configDir))
         const refs = resolveFilterRefs(ds, filters)
         const txs = applyFilters(ds, filters, refs)
         const data = spendBy(txs, opts.by as SpendBy, { tree: opts.tree, tags: ds.tags })
@@ -45,7 +45,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
             by: opts.by, from: period.from, to: period.to, category: refs.categoryPath,
             owner: cmd.optsWithGlobals().owner, account: refs.accountId, currency: filters.currency ?? null,
           },
-          warnings: currencyWarnings(ds, filters.currency),
+          warnings: [...currencyWarnings(ds, filters.currency), ...ds.ownerWarnings],
         }
       })
     })
@@ -62,7 +62,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
       const period = resolvePeriod(filters)
 
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir), ownersFilePath(ctx.paths.configDir))
         const refs = resolveFilterRefs(ds, filters)
         const txs = applyFilters(ds, filters, refs)
         const data = incomeBy(txs, opts.by as 'category' | 'month')
@@ -74,7 +74,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
             by: opts.by, from: period.from, to: period.to, category: refs.categoryPath,
             owner: cmd.optsWithGlobals().owner, account: refs.accountId, currency: filters.currency ?? null,
           },
-          warnings: currencyWarnings(ds, filters.currency),
+          warnings: [...currencyWarnings(ds, filters.currency), ...ds.ownerWarnings],
         }
       })
     })
@@ -97,7 +97,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
       const filters = readFilters(cmd)
 
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir), ownersFilePath(ctx.paths.configDir))
         const refs = resolveFilterRefs(ds, filters)
         const periodTxs = applyFilters(ds, { ...filters, ...periodRange }, refs)
         const vsTxs = applyFilters(ds, { ...filters, ...vsRange }, refs)
@@ -110,7 +110,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
             by: opts.by, period: opts.period, vs: opts.vs,
             category: refs.categoryPath, account: refs.accountId, currency: filters.currency ?? null, owner: cmd.optsWithGlobals().owner,
           },
-          warnings: currencyWarnings(ds, filters.currency),
+          warnings: [...currencyWarnings(ds, filters.currency), ...ds.ownerWarnings],
         }
       })
     })
@@ -136,7 +136,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
       const filters = readFilters(cmd)
 
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir), ownersFilePath(ctx.paths.configDir))
         const refs = resolveFilterRefs(ds, filters)
         const txs = applyFilters(ds, filters, refs)
         const now = ctx.now()
@@ -150,7 +150,7 @@ export function registerAnalytics(program: Command, ctx: AppContext): void {
             months, minMonths, from: window.from, to: window.to,
             category: refs.categoryPath, account: refs.accountId, currency: filters.currency ?? null, owner: cmd.optsWithGlobals().owner,
           },
-          warnings: currencyWarnings(ds, filters.currency),
+          warnings: [...currencyWarnings(ds, filters.currency), ...ds.ownerWarnings],
         }
       })
     })

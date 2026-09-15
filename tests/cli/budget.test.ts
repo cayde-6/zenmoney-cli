@@ -2,7 +2,7 @@ import { it, expect } from 'vitest'
 import { mkdirSync, readFileSync, writeFileSync, statSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { run } from '../../src/cli/program.js'
-import { seededContext, testContext } from '../helpers.js'
+import { seededContext, testContext, withOwnersFile, FAMILY_OWNERS_YAML } from '../helpers.js'
 import { parseBudgetFile } from '../../src/budget/files.js'
 
 it('init writes template, refuses overwrite, --force overwrites', async () => {
@@ -48,6 +48,17 @@ it('status uses owner filter and current month', async () => {
   const d = t.json().data
   expect(d.month).toBe('2026-09')
   expect(d.rows[0]).toMatchObject({ category: 'Groceries', spent: 2500, usedPct: 25 })
+})
+// Review round item 10: a smoke test that owners.yaml's name-based --owner
+// reaches `budget status` through the shared applyFilters path.
+it('status --owner <name> filters by owners.yaml owner name once the file exists', async () => {
+  const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  mkdirSync(t.ctx.paths.budgetDir, { recursive: true })
+  writeFileSync(join(t.ctx.paths.budgetDir, 'default.yaml'), 'currency: PLN\nlimits:\n  Groceries: 10000\n')
+  const code = await run(['node', 'zm', 'budget', 'status', '--owner', 'alex'], t.ctx)
+  expect(code).toBe(0)
+  expect(t.json().meta.owner).toBe('alex')
 })
 it('status skips a limit key that no longer resolves, warning and listing it as unresolved', async () => {
   const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })

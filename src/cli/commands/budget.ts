@@ -6,7 +6,7 @@ import type { AppContext } from '../context.js'
 import { withStore, staleWarnings, formatOf, openCheckedStore } from '../program.js'
 import { categoryPath, loadDataset, meUser } from '../../query/model.js'
 import { applyFilters, isValidMonth } from '../../query/filters.js'
-import { loadOwnersFile } from '../../query/owners.js'
+import { loadOwnersFile, ownersFilePath } from '../../query/owners.js'
 import { loadBudget } from '../../budget/files.js'
 import { budgetStatus, unresolvedLimits, type BudgetStatus, type StatusRow } from '../../budget/status.js'
 import { suggestBudget, suggestWindow } from '../../budget/suggest.js'
@@ -97,13 +97,13 @@ export function registerBudget(program: Command, ctx: AppContext): void {
         const month = opts.month ?? localMonth(ctx.now())
         const owner = cmd.optsWithGlobals().owner
 
-        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir), ownersFilePath(ctx.paths.configDir))
         const { limits, sources, keySources } = loadBudget(ctx.paths.budgetDir, month)
         const { resolvable, unresolved, warnings } = unresolvedLimits(ds, limits, keySources)
         const monthTxs = applyFilters(ds, { month, owner })
         const data = budgetStatus(ds, resolvable, monthTxs, month, ctx.now(), unresolved)
 
-        return { data, meta: { sources, owner }, table: flattenStatusTable(data), warnings }
+        return { data, meta: { sources, owner }, table: flattenStatusTable(data), warnings: [...warnings, ...ds.ownerWarnings] }
       })
     })
 
@@ -126,7 +126,7 @@ export function registerBudget(program: Command, ctx: AppContext): void {
 
       const store = openCheckedStore(ctx)
       try {
-        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir), ownersFilePath(ctx.paths.configDir))
         const owner = cmd.optsWithGlobals().owner
         const txs = applyFilters(ds, { owner })
         const window = suggestWindow(targetMonth, months, ctx.now())
@@ -137,7 +137,7 @@ export function registerBudget(program: Command, ctx: AppContext): void {
         const text = suggestBudget(txs, window, targetMonth, mainCurrency)
 
         const { lastSyncAt } = store.getMeta()
-        for (const w of staleWarnings(ctx, lastSyncAt)) ctx.stderr(`warning: ${w}\n`)
+        for (const w of [...staleWarnings(ctx, lastSyncAt), ...ds.ownerWarnings]) ctx.stderr(`warning: ${w}\n`)
         ctx.stdout(text)
       } finally {
         store.close()

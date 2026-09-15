@@ -17,15 +17,37 @@ it('works with no token and no cache at all', async () => {
   expect(data.token).toEqual({ source: null })
   expect(data.configDir).toBe(t.ctx.paths.configDir)
   expect(data.budgetDir).toBe(t.ctx.paths.budgetDir)
-  expect(data.ownersFile).toEqual({ path: join(t.ctx.paths.configDir, 'owners.yaml'), exists: false })
+  expect(data.ownersFile).toEqual({ path: join(t.ctx.paths.configDir, 'owners.yaml'), exists: false, valid: true })
   expect(data.version).toMatch(/^\d+\.\d+\.\d+$/)
 })
-it('reports ownersFile.exists: true once owners.yaml has been created', async () => {
+it('reports ownersFile.exists: true, valid: true for a well-formed owners.yaml', async () => {
   const t = testContext()
   mkdirSync(t.ctx.paths.configDir, { recursive: true })
   writeFileSync(join(t.ctx.paths.configDir, 'owners.yaml'), 'owners:\n  alex:\n    accounts: [a]\n')
   expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
-  expect(t.json().data.ownersFile).toEqual({ path: join(t.ctx.paths.configDir, 'owners.yaml'), exists: true })
+  expect(t.json().data.ownersFile).toEqual({ path: join(t.ctx.paths.configDir, 'owners.yaml'), exists: true, valid: true })
+})
+// Review round item 9: `zm status` parses owners.yaml itself (independent
+// of the cache, which doesn't even exist in this test) so a broken file is
+// visible without having to run a real read command first.
+it('reports ownersFile.valid: false and an error message for a broken owners.yaml, with no cache at all', async () => {
+  const t = testContext()
+  mkdirSync(t.ctx.paths.configDir, { recursive: true })
+  writeFileSync(join(t.ctx.paths.configDir, 'owners.yaml'), 'owners:\n  alex: [1, 2\n')
+  expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0) // status itself never fails
+  const ownersFile = t.json().data.ownersFile
+  expect(ownersFile.exists).toBe(true)
+  expect(ownersFile.valid).toBe(false)
+  expect(typeof ownersFile.error).toBe('string')
+  expect(ownersFile.error.length).toBeGreaterThan(0)
+})
+it('reports ownersFile.valid: false for a directory at owners.yaml\'s path', async () => {
+  const t = testContext()
+  mkdirSync(join(t.ctx.paths.configDir, 'owners.yaml'), { recursive: true })
+  expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
+  const ownersFile = t.json().data.ownersFile
+  expect(ownersFile.valid).toBe(false)
+  expect(ownersFile.error).toContain(join(t.ctx.paths.configDir, 'owners.yaml'))
 })
 it('never calls the network', async () => {
   const t = testContext({

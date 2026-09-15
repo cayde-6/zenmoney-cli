@@ -7,8 +7,29 @@ import type { AppContext } from '../context.js'
 import { formatOf, readVersion } from '../program.js'
 import { printResult } from '../output.js'
 import { tokenSource } from '../../auth/token.js'
-import { ownersFilePath } from '../../query/owners.js'
+import { loadOwnersFile, ownersFilePath } from '../../query/owners.js'
+import { ZmError } from '../../errors.js'
 import { round1 } from '../../util.js'
+
+interface OwnersFileInfo { path: string; exists: boolean; valid: boolean; error?: string }
+
+// Parses owners.yaml (if any) without ever touching the cache — `zm status`
+// must work with no cache at all, so this can't reuse whatever a read
+// command's own Dataset already validated. `valid` is true both when the
+// file doesn't exist and when it parses cleanly; only a genuine parse/read
+// failure (bad yaml/shape, or an unreadable path — e.g. a directory) sets
+// it false and fills in `error`.
+function readOwnersFileInfo(configDir: string): OwnersFileInfo {
+  const path = ownersFilePath(configDir)
+  const exists = existsSync(path)
+  try {
+    loadOwnersFile(configDir)
+    return { path, exists, valid: true }
+  } catch (e) {
+    const message = e instanceof ZmError ? e.message : e instanceof Error ? e.message : String(e)
+    return { path, exists, valid: false, error: message }
+  }
+}
 
 interface CacheInfo { path: string; exists: boolean; readable: boolean; lastSyncAt: string | null; ageHours: number | null; error?: string }
 
@@ -303,14 +324,13 @@ export function registerStatus(program: Command, ctx: AppContext): void {
 
       // Only *where* a token would come from, never its value.
       const source = tokenSource({ env: ctx.env, keychain: ctx.keychain, configFile: ctx.paths.configFile })
-      const ownersPath = ownersFilePath(ctx.paths.configDir)
 
       const data = {
         cache,
         token: { source },
         configDir: ctx.paths.configDir,
         budgetDir: ctx.paths.budgetDir,
-        ownersFile: { path: ownersPath, exists: existsSync(ownersPath) },
+        ownersFile: readOwnersFileInfo(ctx.paths.configDir),
         version: readVersion(),
       }
       printResult({ data, meta: {} }, format, ctx.stdout)

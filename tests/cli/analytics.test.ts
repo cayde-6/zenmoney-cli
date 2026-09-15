@@ -1,8 +1,18 @@
 import { it, expect } from 'vitest'
 import { run } from '../../src/cli/program.js'
-import { seededContext, testContext } from '../helpers.js'
+import { seededContext, testContext, withOwnersFile, FAMILY_OWNERS_YAML } from '../helpers.js'
 
 const zm = async (args: string[]) => { const t = seededContext(); const code = await run(['node', 'zm', ...args], t.ctx); return { code, t } }
+
+// Review round item 10: a smoke test that owners.yaml's name-based --owner
+// reaches spend through the shared applyFilters path, same as tx/accounts.
+it('spend --owner <name> filters by owners.yaml owner name once the file exists', async () => {
+  const t = seededContext()
+  withOwnersFile(t, FAMILY_OWNERS_YAML)
+  const code = await run(['node', 'zm', 'spend', '--by', 'category', '--month', '2026-09', '--owner', 'alex'], t.ctx)
+  expect(code).toBe(0)
+  expect(t.json().meta.owner).toBe('alex')
+})
 
 it('spend --by category --month', async () => {
   const { code, t } = await zm(['spend', '--by', 'category', '--month', '2026-09', '--owner', 'me'])

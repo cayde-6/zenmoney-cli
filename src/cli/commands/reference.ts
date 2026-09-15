@@ -3,8 +3,9 @@ import type { AppContext } from '../context.js'
 import { addFilterOptions, readFilters, withStore } from '../program.js'
 import { categoryPath, loadDataset, meUser, type TxType } from '../../query/model.js'
 import { applyFilters, currencyWarnings, ownerNameMatches, resolveFilterRefs, resolveOwner, resolveOwnerName, resolvePeriod, usedCurrencies } from '../../query/filters.js'
-import { loadOwnersFile, ownersFilePath } from '../../query/owners.js'
+import { loadOwnersFile, ownersFilePath, entryMatchesAccount, type OwnersFile } from '../../query/owners.js'
 import { flattenTxTable } from '../output.js'
+import type { TableRow } from '../output.js'
 import { ZmError } from '../../errors.js'
 import { compareNames } from '../../util.js'
 import type { ZmAccount } from '../../api/types.js'
@@ -48,6 +49,46 @@ function kindOfTag(tag: { showIncome: boolean; showOutcome: boolean }): 'expense
   return 'both'
 }
 
+// Flattens `zm owners` for `--format table`: one row per (owner, account)
+// pair, plus one row per unassigned account with a literal '(unassigned)'
+// owner — the nested `{ owners: [...], unassigned: [...] }` shape would
+// otherwise fail the "flat object array" check and fall back to a raw JSON
+// dump.
+function flattenOwnersTable(
+  owners: { name: string; accounts: { id: string; title: string }[] }[],
+  unassigned: { id: string; title: string }[],
+): TableRow[] {
+  const rows: TableRow[] = []
+  for (const o of owners) {
+    for (const a of o.accounts) rows.push({ owner: o.name, id: a.id, title: a.title })
+  }
+  for (const a of unassigned) rows.push({ owner: '(unassigned)', id: a.id, title: a.title })
+  return rows
+}
+
+// `zm owners`-only warnings about the quality of owners.yaml's own entries
+// (as opposed to matchOwners' warnings about a real matching conflict):
+// an entry that matches nothing is almost always a typo or a renamed/closed
+// account, and an entry that matches most of the account list is likely
+// too broad to mean what its author intended. Always computed over EVERY
+// account (archived included), independent of `--archived`, since matching
+// itself never depends on that flag either.
+function entryMatchWarnings(file: OwnersFile, accounts: ZmAccount[]): string[] {
+  const warnings: string[] = []
+  const total = accounts.length
+  for (const [name, entries] of file.owners) {
+    for (const entry of entries) {
+      const matched = accounts.filter(a => entryMatchesAccount(entry, a)).length
+      if (matched === 0) {
+        warnings.push(`entry "${entry}" of owner ${name} matches no accounts`)
+      } else if (total > 0 && matched > total / 2) {
+        warnings.push(`entry "${entry}" of owner ${name} matches ${matched} of ${total} accounts`)
+      }
+    }
+  }
+  return warnings
+}
+
 interface CategoryRow { id: string; path: string; parentId: string | null; kind: string }
 
 // Flattens `categories --tree` for `--format table`: the nested `children`
@@ -70,6 +111,17 @@ export function registerReference(program: Command, ctx: AppContext): void {
     .description('List ZenMoney users on this account')
     .addHelpText('after', '\nExamples:\n  zm users\n  zm users --format table\n')
     .action((_opts, cmd) => {
+      // A family-member owner NAME (owners.yaml) has no natural mapping onto
+      // ZenMoney's own user list — that mismatch is exactly why owners.yaml
+      // exists for accounts/tx — so `users` rejects any non-'all' --owner
+      // once the file is active, the same way categories/rates reject it
+      // outright, rather than silently keeping the old me/login/id semantics
+      // as if owners.yaml didn't change anything. Checked before opening the
+      // cache alongside the file read, so it fails the same way regardless
+      // of whether a cache exists.
+      if (loadOwnersFile(ctx.paths.configDir) !== null && cmd.optsWithGlobals().owner !== 'all') {
+        throw new ZmError('INVALID_ARGS', '--owner is not supported by users', 'owners.yaml is active; zm users lists ZenMoney users -- use zm owners')
+      }
       withStore(ctx, cmd, store => {
         const ds = loadDataset(store)
         const ownerIds = resolveOwner(ds, cmd.optsWithGlobals().owner)
@@ -91,17 +143,26 @@ export function registerReference(program: Command, ctx: AppContext): void {
     .addHelpText('after', '\nExamples:\n  zm accounts\n  zm accounts --archived --owner me\n')
     .action((opts, cmd) => {
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir), ownersFilePath(ctx.paths.configDir))
         const loginOf = (userId: number) => ds.users.find(u => u.id === userId)?.login ?? String(userId)
         // Once owners.yaml exists, `owner` reports the file's owner name (or
         // null when unassigned) instead of the ZenMoney login, and --owner
         // filters by that name/unassigned/all instead of by ZenMoney user.
         const ownerOf = (a: ZmAccount): string | null => ds.ownerNames !== null ? (ds.ownerOf.get(a.id) ?? null) : loginOf(a.user)
-        const matchesOwnerFilter = (a: ZmAccount): boolean => {
-          if (ds.ownerNames !== null) return ownerNameMatches(resolveOwnerName(ds.ownerNames, cmd.optsWithGlobals().owner), ds.ownerOf.get(a.id) ?? null)
-          const ownerIds = resolveOwner(ds, cmd.optsWithGlobals().owner)
-          return ownerIds === null || ownerIds.has(a.user)
-        }
+        // Resolved once, unconditionally, up front — NOT lazily inside the
+        // per-account filter predicate below. A version that resolved
+        // --owner only when the predicate actually ran could skip
+        // validation entirely whenever every account got filtered out by
+        // something else first (e.g. --archived not passed and every
+        // account happens to be archived), silently returning an empty
+        // list with exit 0 instead of failing on a bad --owner value.
+        const ownerValue = cmd.optsWithGlobals().owner
+        const legacyOwnerIds = ds.ownerNames === null ? resolveOwner(ds, ownerValue) : null
+        const resolvedOwnerName = ds.ownerNames !== null ? resolveOwnerName(ds.ownerNames, ds.ownersPath ?? 'owners.yaml', ownerValue) : null
+        const matchesOwnerFilter = (a: ZmAccount): boolean =>
+          resolvedOwnerName !== null
+            ? ownerNameMatches(resolvedOwnerName, ds.ownerOf.get(a.id) ?? null)
+            : (legacyOwnerIds === null || legacyOwnerIds.has(a.user))
         const data = [...ds.accounts.values()]
           .filter(a => opts.archived || !a.archive)
           .filter(matchesOwnerFilter)
@@ -116,7 +177,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
             owner: ownerOf(a),
           }))
           .sort((a, b) => compareNames(a.title, b.title))
-        return { data }
+        return { data, warnings: ds.ownerWarnings }
       })
     })
 
@@ -129,7 +190,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
       withStore(ctx, cmd, store => {
         const filePath = ownersFilePath(ctx.paths.configDir)
         const ownersFile = loadOwnersFile(ctx.paths.configDir)
-        const ds = loadDataset(store, ownersFile)
+        const ds = loadDataset(store, ownersFile, filePath)
         const toRef = (a: ZmAccount): { id: string; title: string } => ({ id: a.id, title: a.title })
         const accountsList = [...ds.accounts.values()].filter(a => opts.archived || !a.archive)
 
@@ -138,6 +199,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
             { file: null, owners: [], unassigned: accountsList.map(toRef) }
           return {
             data,
+            table: flattenOwnersTable([], accountsList),
             warnings: [`no owners.yaml found — create ${filePath} to split accounts by family member (see README's Owners section)`],
           }
         }
@@ -147,7 +209,16 @@ export function registerReference(program: Command, ctx: AppContext): void {
           accounts: accountsList.filter(a => ds.ownerOf.get(a.id) === name).map(toRef),
         }))
         const unassigned = accountsList.filter(a => !ds.ownerOf.has(a.id)).map(toRef)
-        return { data: { file: filePath as string | null, owners, unassigned } }
+        // Every account (archived included — matching itself always
+        // considers archived accounts; --archived only ever affects what's
+        // *displayed*) is used for these entry-quality warnings, so they
+        // don't fluctuate depending on whether --archived was passed.
+        const warnings = [...ds.ownerWarnings, ...entryMatchWarnings(ownersFile, [...ds.accounts.values()])]
+        return {
+          data: { file: filePath as string | null, owners, unassigned },
+          table: flattenOwnersTable(owners, unassigned),
+          ...(warnings.length ? { warnings } : {}),
+        }
       })
     })
 
@@ -215,7 +286,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
       const period = resolvePeriod(filters)
 
       withStore(ctx, cmd, store => {
-        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir))
+        const ds = loadDataset(store, loadOwnersFile(ctx.paths.configDir), ownersFilePath(ctx.paths.configDir))
         const refs = resolveFilterRefs(ds, filters)
         const matched = applyFilters(ds, filters, refs)
         const data = matched.slice(0, limit)
@@ -236,7 +307,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
             total: matched.length,
             returned: data.length,
           },
-          warnings: currencyWarnings(ds, filters.currency),
+          warnings: [...currencyWarnings(ds, filters.currency), ...ds.ownerWarnings],
         }
       })
     })
