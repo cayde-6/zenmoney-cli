@@ -129,6 +129,16 @@ Initial release of `@cayde-6/zenmoney-cli`.
   when a Keychain **is** available but the write to it fails, `zm auth`
   now adds a `warnings` entry saying so, instead of silently falling back
   to `config.json` with no indication anything went wrong.
+- `zm recurring` finds recurring payments on real ZenMoney data where an
+  expense has no resolved merchant and no payee at all — common for
+  subscriptions like Netflix or iCloud, where the only text is the
+  free-form `comment`. Both `zm recurring` and `zm spend --by merchant` now
+  fall back through `merchant` -> `payee` -> `originalPayee` -> `comment`
+  (previously `recurring` only ever looked at `merchant`, so it returned
+  nothing at all for accounts without merchant-tagged transactions).
+  `recurring`'s output gains a `source` field naming which of those four
+  fields the label came from, and its grouping key now also collapses
+  internal whitespace (not just case and leading/trailing whitespace).
 
 ### Changed
 
@@ -137,7 +147,9 @@ Initial release of `@cayde-6/zenmoney-cli`.
   string), exported as `NO_CATEGORY` and used everywhere instead of a
   duplicated literal.
 - `zm spend --by merchant`'s fallback group key for a transaction with no
-  merchant is `(no merchant)` (not a Russian string).
+  merchant is `(no merchant)` (not a Russian string) — since `--by merchant`
+  now also falls back to payee/originalPayee/comment, this bucket only
+  appears when all four of those fields are empty.
 - All sorting of names/paths/keys (categories, accounts, currencies,
   merchants, ...) uses one shared `Intl.Collator('en')`-based comparator,
   so ordering is deterministic regardless of the process's `LANG`. Cyrillic

@@ -39,6 +39,20 @@ it('by month and merchant', () => {
   expect(spendBy(food, 'month').map(g => [g.key, g.amounts[0]!.amount])).toEqual([['2026-06', 40000], ['2026-07', 50000], ['2026-08', 45000], ['2026-09', 4500]])
   expect(spendBy(sept, 'merchant').find(g => g.key === 'FreshMart')!.amounts).toEqual([{ currency: 'PLN', amount: 2500, count: 2 }])
 })
+// spend --by merchant must use the same merchant -> payee -> originalPayee ->
+// comment fallback as `zm recurring` (fixture txs t20..t23: no merchant, no
+// payee, no originalPayee, only a comment), so the two commands agree on what
+// a transaction's "merchant" is.
+it('by merchant falls back to comment, same as findRecurring', () => {
+  const music = applyFilters(ds, { category: 'Music' })
+  const group = spendBy(music, 'merchant').find(g => g.key === 'Music Plus')
+  expect(group).toBeDefined()
+  expect(group!.amounts).toEqual([{ currency: 'PLN', amount: 6000, count: 4 }])
+})
+it('the (no merchant) bucket only appears when merchant, payee, originalPayee, and comment are all empty', () => {
+  const noLabel = { ...ds.txs.find(t => t.categoryPath === 'Music')!, id: 'nl1', merchant: null, payee: null, originalPayee: null, comment: null }
+  expect(spendBy([noLabel], 'merchant').map(g => g.key)).toEqual(['(no merchant)'])
+})
 it('income', () => {
   expect(incomeBy(sept, 'category')).toEqual([{ key: 'Salary', amounts: [{ currency: 'EUR', amount: 4200, count: 1 }] }])
 })

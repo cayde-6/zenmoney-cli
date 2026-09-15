@@ -60,6 +60,13 @@ it('recurring meta reports null for filters not given', async () => {
   expect(await run(['node', 'zm', 'recurring'], t.ctx)).toBe(0)
   expect(t.json().meta).toMatchObject({ category: null, account: null, currency: null, owner: 'all' })
 })
+it('recurring finds a subscription with no merchant/payee/originalPayee via the comment fallback', async () => {
+  const t = seededContext({ now: () => new Date('2026-03-20T12:00:00') })
+  expect(await run(['node', 'zm', 'recurring', '--months', '4'], t.ctx)).toBe(0)
+  expect(t.json().data).toEqual([
+    expect.objectContaining({ merchant: 'Music Plus', source: 'comment', periodicity: 'monthly' }),
+  ])
+})
 it('recurring rejects invalid --months', async () => {
   for (const months of ['0', '37', '2.5']) {
     const { code, t } = await zm(['recurring', '--months', months])

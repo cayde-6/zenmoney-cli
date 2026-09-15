@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest'
-import { loadDataset, meUser, type Dataset } from '../../src/query/model.js'
+import { loadDataset, meUser, merchantLabel, type Dataset, type Tx } from '../../src/query/model.js'
 import { fixtureStore } from '../helpers.js'
 import { Store } from '../../src/store/store.js'
 import { fixtureDiff } from '../fixtures/diff.js'
@@ -8,7 +8,7 @@ import type { ZmTransaction } from '../../src/api/types.js'
 const ds = () => loadDataset(fixtureStore())
 const byId = (id: string) => ds().txs.find(t => t.id === id)!
 
-it('excludes deleted', () => { expect(ds().txs.some(t => t.id === 't9')).toBe(false); expect(ds().txs).toHaveLength(18) })
+it('excludes deleted', () => { expect(ds().txs.some(t => t.id === 't9')).toBe(false); expect(ds().txs).toHaveLength(22) })
 it('classifies all types', () => {
   expect(byId('t1')).toMatchObject({ type: 'expense', amount: 3000, currency: 'PLN', categoryPath: 'Groceries', merchant: 'FreshMart', ownerId: 10 })
   expect(byId('t2')).toMatchObject({ type: 'expense', ownerId: 11, merchant: 'CornerShop' })
@@ -152,4 +152,29 @@ it('meUser throws NO_CACHE when the dataset has no main user', () => {
     accounts: new Map(), tags: new Map(), instruments: new Map(), txs: [],
   }
   expect(() => meUser(noMainUser)).toThrow(expect.objectContaining({ code: 'NO_CACHE' }))
+})
+
+// merchantLabel is the shared fallback (merchant -> payee -> originalPayee ->
+// comment) used by both `zm recurring` and `zm spend --by merchant`, so real
+// ZenMoney data with no merchant/payee at all (only a free-form comment) is
+// still attributed to something instead of being silently dropped.
+function labelTx(over: Partial<Tx>): Tx {
+  return {
+    id: 'x', date: '2026-09-01', type: 'expense', amount: 10, currency: 'EUR',
+    accountId: 'a', accountTitle: 'a', ownerId: 1, categoryId: null, topCategoryId: null,
+    categoryPath: 'Uncategorized', merchant: null, payee: null, comment: null, hold: false, originalPayee: null, ...over,
+  }
+}
+it('merchantLabel prefers merchant, then payee, then originalPayee, then comment', () => {
+  expect(merchantLabel(labelTx({ merchant: 'M', payee: 'P', originalPayee: 'O', comment: 'C' }))).toEqual({ label: 'M', source: 'merchant' })
+  expect(merchantLabel(labelTx({ merchant: null, payee: 'P', originalPayee: 'O', comment: 'C' }))).toEqual({ label: 'P', source: 'payee' })
+  expect(merchantLabel(labelTx({ merchant: null, payee: null, originalPayee: 'O', comment: 'C' }))).toEqual({ label: 'O', source: 'originalPayee' })
+  expect(merchantLabel(labelTx({ merchant: null, payee: null, originalPayee: null, comment: 'C' }))).toEqual({ label: 'C', source: 'comment' })
+})
+it('merchantLabel returns null when merchant, payee, originalPayee, and comment are all empty or whitespace-only', () => {
+  expect(merchantLabel(labelTx({}))).toBeNull()
+  expect(merchantLabel(labelTx({ merchant: '  ', payee: '\t', originalPayee: '', comment: '   ' }))).toBeNull()
+})
+it('merchantLabel trims the winning field', () => {
+  expect(merchantLabel(labelTx({ comment: '  Music Plus  ' }))).toEqual({ label: 'Music Plus', source: 'comment' })
 })

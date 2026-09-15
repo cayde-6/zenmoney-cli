@@ -48,6 +48,7 @@ export function fixtureDiff(): ZmDiff {
       { id: 'dent', user: 10, title: 'Dentist', parent: 'health', showIncome: false, showOutcome: true, changed: c },
       { id: 'salary', user: 10, title: 'Salary', parent: null, showIncome: true, showOutcome: false, changed: c },
       { id: 'subs', user: 10, title: 'Subscriptions', parent: null, showIncome: false, showOutcome: true, changed: c },
+      { id: 'music', user: 10, title: 'Music', parent: null, showIncome: false, showOutcome: true, changed: c },
     ],
     merchant: [
       { id: 'm-fresh', user: 10, title: 'FreshMart', changed: c },
@@ -73,6 +74,17 @@ export function fixtureDiff(): ZmDiff {
       expense('2026-08-10', 'acc-pln', 45000, 'food'),                                   // t17
       expense('2026-08-20', 'acc-eur', 30, 'cafe'),                                     // t18
       expense('2026-09-09', 'acc-pln', 5000, 'health'),                                 // t19 parent's own op
+      // A real ZenMoney expense with no merchant and no payee/originalPayee at
+      // all — the only human-readable text is the free-form comment. Dated
+      // well before every other fixture transaction (Dec 2025 - Mar 2026) so
+      // it never falls inside any existing test's date window/month filter;
+      // it exists only to be picked up by findRecurring's/spend --by
+      // merchant's comment fallback (see tests/analytics/recurring.test.ts
+      // and tests/analytics/spend.test.ts).
+      expense('2025-12-15', 'acc-pln', 1500, 'music', { comment: 'Music Plus' }),          // t20
+      expense('2026-01-15', 'acc-pln', 1500, 'music', { comment: 'Music Plus' }),          // t21
+      expense('2026-02-15', 'acc-pln', 1500, 'music', { comment: 'Music Plus' }),          // t22
+      expense('2026-03-15', 'acc-pln', 1500, 'music', { comment: 'Music Plus' }),          // t23
     ],
     deletion: [],
   }

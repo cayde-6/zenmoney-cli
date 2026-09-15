@@ -1,13 +1,21 @@
-import type { Tx } from '../query/model.js'
+import type { MerchantSource, Tx } from '../query/model.js'
+import { merchantLabel } from '../query/model.js'
 import { addMonths, compareNames, monthOf, round2, localMonth } from '../util.js'
 
 // The index signature makes this directly usable as a `--format table` row
 // (Record<string, string | number | null>) with no cast needed.
 export interface RecurringItem {
-  merchant: string; categoryPath: string; currency: string
+  merchant: string; source: MerchantSource; categoryPath: string; currency: string
   monthsSeen: number; windowMonths: number; avgAmount: number; lastAmount: number; lastDate: string
   periodicity: 'monthly' | 'irregular'
   [field: string]: string | number | null
+}
+
+// Case-insensitive grouping key for a merchant label, with internal
+// whitespace collapsed too (not just trimmed) — 'Corner  Shop' and 'Corner
+// Shop' are the same subscription, not two.
+function normalizeKey(label: string): string {
+  return label.toLowerCase().replace(/\s+/g, ' ')
 }
 
 // The `months`-wide window ending at the calendar month of `now`, as YYYY-MM strings.
@@ -17,14 +25,16 @@ export function recurringWindow(months: number, now: Date): { from: string; to: 
 }
 
 interface Group {
-  merchant: string; categoryPath: string; currency: string
+  merchant: string; source: MerchantSource; categoryPath: string; currency: string
   months: Set<string>; sum: number; count: number; lastDate: string; lastAmount: number; lastId: string
 }
 
-// Consumes only `expense` txs with a non-null merchant, inside the window.
-// Groups by merchant (case-insensitive, trimmed) + categoryPath + currency, so
-// amounts across currencies are never mixed. Reports the most recent
-// transaction's merchant spelling, amount, and date per group.
+// Consumes only `expense` txs that resolve to a non-empty label via
+// merchantLabel (merchant -> payee -> originalPayee -> comment fallback — see
+// query/model.ts), inside the window. Groups by that label (case-insensitive,
+// whitespace-collapsed) + categoryPath + currency, so amounts across
+// currencies are never mixed. Reports the most recent transaction's label
+// spelling, source, amount, and date per group.
 export function findRecurring(txs: Tx[], opts: { months: number; now: Date; minMonths?: number }): RecurringItem[] {
   const { months, now } = opts
   const minMonths = opts.minMonths ?? 3
@@ -36,18 +46,20 @@ export function findRecurring(txs: Tx[], opts: { months: number; now: Date; minM
 
   const groups = new Map<string, Group>()
   for (const t of txs) {
-    if (t.type !== 'expense' || t.merchant === null) continue
+    if (t.type !== 'expense') continue
+    const resolved = merchantLabel(t)
+    if (!resolved) continue
+    const { label: merchant, source } = resolved
     const month = monthOf(t.date)
     if (month < from || month > current) continue
 
-    const merchant = t.merchant.trim()
     // JSON.stringify(array) rather than a delimited string: merchant/categoryPath
     // text can itself contain any separator character, which a fixed-delimiter
     // key would risk colliding on (see suggestBudget's key for the same reasoning).
-    const key = JSON.stringify([merchant.toLowerCase(), t.categoryPath, t.currency])
+    const key = JSON.stringify([normalizeKey(merchant), t.categoryPath, t.currency])
     let g = groups.get(key)
     if (!g) {
-      g = { merchant, categoryPath: t.categoryPath, currency: t.currency, months: new Set(), sum: 0, count: 0, lastDate: t.date, lastAmount: t.amount, lastId: t.id }
+      g = { merchant, source, categoryPath: t.categoryPath, currency: t.currency, months: new Set(), sum: 0, count: 0, lastDate: t.date, lastAmount: t.amount, lastId: t.id }
       groups.set(key, g)
     }
     g.months.add(month)
@@ -61,6 +73,7 @@ export function findRecurring(txs: Tx[], opts: { months: number; now: Date; minM
       g.lastId = t.id
       g.lastAmount = t.amount
       g.merchant = merchant
+      g.source = source
     }
   }
 
@@ -79,7 +92,7 @@ export function findRecurring(txs: Tx[], opts: { months: number; now: Date; minM
     const periodicity: 'monthly' | 'irregular' =
       g.months.size >= 2 && requiredForGroup.every(m => g.months.has(m)) ? 'monthly' : 'irregular'
     items.push({
-      merchant: g.merchant, categoryPath: g.categoryPath, currency: g.currency,
+      merchant: g.merchant, source: g.source, categoryPath: g.categoryPath, currency: g.currency,
       monthsSeen: g.months.size, windowMonths: months,
       avgAmount: round2(g.sum / g.count), lastAmount: g.lastAmount, lastDate: g.lastDate,
       periodicity,

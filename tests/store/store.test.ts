@@ -9,7 +9,7 @@ import { fixtureDiff } from '../fixtures/diff.js'
 it('applies a full diff', () => {
   const s = Store.memory()
   const stats = s.applyDiff(fixtureDiff(), new Date('2026-09-15T08:00:00Z'))
-  expect(stats.upserted.transaction).toBe(19)
+  expect(stats.upserted.transaction).toBe(23)
   expect(s.all('account')).toHaveLength(5)
   expect(s.all('transaction').find(t => t.id === 't1')?.outcome).toBe(3000)
   expect(s.getMeta()).toEqual({ serverTimestamp: 1789000000, lastSyncAt: '2026-09-15T08:00:00.000Z' })
@@ -60,7 +60,7 @@ it('applyDiff throws and leaves the store unchanged when an entity cannot be ser
 it('applyDiff with reset:true removes rows absent from the new diff, in one transaction', () => {
   const s = Store.memory()
   s.applyDiff(fixtureDiff(), new Date('2026-09-15T08:00:00Z'))
-  expect(s.all('transaction').length).toBe(19)
+  expect(s.all('transaction').length).toBe(23)
   const stats = s.applyDiff(
     { serverTimestamp: 999, user: [{ id: 10, login: 'owner', currency: 3, parent: null, changed: 1 }] },
     new Date('2026-09-16T00:00:00Z'),

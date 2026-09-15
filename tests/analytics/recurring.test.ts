@@ -13,7 +13,7 @@ it('finds monthly subscription', () => {
   // appearance through the month before now (06..08, 09 being the current,
   // possibly-incomplete month) — so it still counts as monthly.
   expect(findRecurring(ds.txs, { months: 6, now })).toEqual([
-    { merchant: 'Netflix', categoryPath: 'Subscriptions', currency: 'EUR', monthsSeen: 4, windowMonths: 6, avgAmount: 12, lastAmount: 12, lastDate: '2026-09-15', periodicity: 'monthly' },
+    { merchant: 'Netflix', source: 'merchant', categoryPath: 'Subscriptions', currency: 'EUR', monthsSeen: 4, windowMonths: 6, avgAmount: 12, lastAmount: 12, lastDate: '2026-09-15', periodicity: 'monthly' },
   ])
 })
 it('irregular when a month is skipped between first-seen and the month before current', () => {
@@ -38,7 +38,7 @@ it('merges merchant spellings case-insensitively/trimmed, using the latest spell
   const late = { ...netflixTx, id: 'x2', date: '2026-08-20', merchant: 'netflix' }
   expect(findRecurring([early, late], { months: 2, now: new Date('2026-08-25T12:00:00'), minMonths: 2 })).toEqual([
     {
-      merchant: 'netflix', categoryPath: netflixTx.categoryPath, currency: netflixTx.currency,
+      merchant: 'netflix', source: 'merchant', categoryPath: netflixTx.categoryPath, currency: netflixTx.currency,
       monthsSeen: 2, windowMonths: 2, avgAmount: netflixTx.amount, lastAmount: netflixTx.amount,
       lastDate: '2026-08-20', periodicity: 'monthly',
     },
@@ -82,4 +82,27 @@ it('ties on the latest date break deterministically by id (lexicographically gre
   const lower = { ...netflixTx, id: 'm10', date: '2026-08-20', amount: 20, merchant: 'netflix' }
   const result = findRecurring([higher, lower], { months: 1, now: new Date('2026-08-25T12:00:00'), minMonths: 1 })
   expect(result[0]).toMatchObject({ lastAmount: 10, merchant: 'Netflix' })
+})
+// Real ZenMoney data: a subscription with no merchant match and no
+// payee/originalPayee at all — the only text is the free-form comment (fixture
+// txs t20..t23, dated well outside every other test's window so they can only
+// show up here). Regression for findRecurring only ever considering `merchant`.
+it('falls back to comment when merchant, payee, and originalPayee are all null', () => {
+  const now2 = new Date('2026-03-20T12:00:00')
+  expect(findRecurring(ds.txs, { months: 4, now: now2 })).toEqual([
+    {
+      merchant: 'Music Plus', source: 'comment', categoryPath: 'Music', currency: 'PLN',
+      monthsSeen: 4, windowMonths: 4, avgAmount: 1500, lastAmount: 1500, lastDate: '2026-03-15',
+      periodicity: 'monthly',
+    },
+  ])
+})
+it('the fallback chain prefers payee and originalPayee over comment when present', () => {
+  const base = { ...netflixTx, categoryPath: 'Music', currency: 'PLN' }
+  const viaPayee = { ...base, id: 'f1', date: '2026-01-10', merchant: null, payee: 'PayeeWins', originalPayee: 'OrigLoses', comment: 'CommentLoses' }
+  const viaOriginalPayee = { ...base, id: 'f2', date: '2026-02-10', merchant: null, payee: null, originalPayee: 'OrigWins', comment: 'CommentLoses' }
+  const r1 = findRecurring([viaPayee], { months: 1, now: new Date('2026-01-20T12:00:00'), minMonths: 1 })
+  const r2 = findRecurring([viaOriginalPayee], { months: 1, now: new Date('2026-02-20T12:00:00'), minMonths: 1 })
+  expect(r1[0]).toMatchObject({ merchant: 'PayeeWins', source: 'payee' })
+  expect(r2[0]).toMatchObject({ merchant: 'OrigWins', source: 'originalPayee' })
 })

@@ -184,3 +184,28 @@ export function meUser(ds: Dataset): ZmUser {
   if (!user) throw new ZmError('NO_CACHE', 'cache has no main user', 'run zm sync --full')
   return user
 }
+
+export type MerchantSource = 'merchant' | 'payee' | 'originalPayee' | 'comment'
+
+// Shared by analytics/recurring.ts and analytics/spend.ts (`spend --by
+// merchant`), so the two commands can never disagree on what a transaction's
+// "merchant" is. Real ZenMoney expenses often have no merchant match and no
+// payee at all — the only human-readable text is the free-form comment (e.g.
+// a subscription name like 'Netflix' or 'iCloud') — so this falls back
+// through merchant -> payee -> originalPayee -> comment, using the first one
+// that's non-empty after trimming. `source` reports which field the label
+// actually came from, so callers can tell a real merchant/payee match apart
+// from a comment-derived guess.
+export function merchantLabel(t: Tx): { label: string; source: MerchantSource } | null {
+  const candidates: [string | null, MerchantSource][] = [
+    [t.merchant, 'merchant'],
+    [t.payee, 'payee'],
+    [t.originalPayee, 'originalPayee'],
+    [t.comment, 'comment'],
+  ]
+  for (const [value, source] of candidates) {
+    const trimmed = value?.trim()
+    if (trimmed) return { label: trimmed, source }
+  }
+  return null
+}

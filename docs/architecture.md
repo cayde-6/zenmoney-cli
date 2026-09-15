@@ -388,6 +388,18 @@ months, and never suggesting a limit `<= 0`.
   through the window is still "monthly," rather than being penalized for a
   window that starts before it existed; a single occurrence is never
   "monthly," however narrow the window.
+- **Merchant label fallback chain.** Real ZenMoney expenses frequently have
+  no resolved merchant and no payee/originalPayee at all — the only
+  human-readable text is the free-form `comment` (e.g. `"Netflix"`,
+  `"Telegram Premium"`, `"iCloud"`). `query/model.ts: merchantLabel` falls
+  back through `merchant` -> `payee` -> `originalPayee` -> `comment`,
+  reporting which field won as `source`. `recurring` and `spend --by
+  merchant` both call this one function, so they can never disagree on what
+  a transaction's "merchant" is; the grouping key it feeds into `recurring`
+  is additionally lowercased and has internal whitespace collapsed (not
+  just trimmed), so spelling/spacing variants of the same label still merge.
+  `spend --by merchant`'s `(no merchant)` bucket now only appears when all
+  four of those fields are empty.
 - **Owner = the primary side's account, not the raw `user` field.** See
   "Owner semantics" above — this is what makes `--owner` a meaningful
   filter on a shared account rather than an artifact of who happened to

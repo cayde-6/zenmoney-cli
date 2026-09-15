@@ -103,10 +103,10 @@ Run `zm <command> --help` for the exact flags and examples of any command.
 | `zm categories` | `--tree` | `[{ id, path, parentId, kind }]`, or nested `{ ...,children: [...] }` with `--tree` |
 | `zm rates` | – | `[{ currency, rate }]` relative to the main user's currency; `meta.note` marks it as current, not historical |
 | `zm tx` | `--from/--to/--month`, `--category/--account/--currency`, `--type`, `--search`, `--limit` (default 100) | `[{ id, date, type, amount, currency, categoryPath, merchant, payee, accountTitle, hold, originalPayee, ... }]` — `hold` (boolean) marks a not-yet-settled ZenMoney transaction, counted normally; `meta.total`/`meta.returned` say whether the list was cut off |
-| `zm spend` | `--from/--to/--month`, `--category/--account/--currency`, `--by category\|month\|merchant`, `--tree` | `[{ key, amounts: [{ currency, amount, count }], children? }]` |
+| `zm spend` | `--from/--to/--month`, `--category/--account/--currency`, `--by category\|month\|merchant`, `--tree` | `[{ key, amounts: [{ currency, amount, count }], children? }]` — `--by merchant` uses the same merchant -> payee -> originalPayee -> comment fallback as `zm recurring`; the `(no merchant)` bucket only appears when all four are empty |
 | `zm income` | `--from/--to/--month`, `--category/--account/--currency`, `--by category\|month` | same shape as `spend`, income transactions only |
 | `zm compare` | `--category/--account/--currency`, `--period`, `--vs`, `--by total\|category` | `[{ key, currency, period, vs, diff, diffPct }]` |
-| `zm recurring` | `--category/--account/--currency`, `--months`, `--min-months` | `[{ merchant, categoryPath, currency, monthsSeen, windowMonths, avgAmount, lastAmount, lastDate, periodicity }]` |
+| `zm recurring` | `--category/--account/--currency`, `--months`, `--min-months` | `[{ merchant, source, categoryPath, currency, monthsSeen, windowMonths, avgAmount, lastAmount, lastDate, periodicity }]` — `merchant` falls back through merchant -> payee -> originalPayee -> comment (real ZenMoney expenses often have only a comment, e.g. "Netflix"); `source` says which field it came from |
 | `zm budget init` | `--force` | `{ file }` — writes a commented `default.yaml` template |
 | `zm budget status` | `--month` | `{ month, monthElapsedPct, rows: [{ category, categoryId, currency, planned, spent, spentOtherCurrencies, remaining, usedPct, monthElapsedPct, pace }], unplanned, unresolved: [{ key, amount, currency }] }` — a limit key that no longer resolves to any category is skipped (with a warning) rather than failing the command, and listed in `unresolved` |
 | `zm budget suggest` | `--months` (default 3), `--month` (default next month) | prints a draft yaml to stdout (not JSON, not written to a file) |
@@ -125,7 +125,9 @@ zm budget status
 zm recurring --months 6
 ```
 Looks for the same merchant + category recurring in at least 3 of the last 6
-months.
+months. "Merchant" falls back through merchant -> payee -> originalPayee ->
+comment, since real ZenMoney expenses often have no resolved merchant or
+payee and only a free-form comment (e.g. "Netflix", "iCloud").
 
 **Plan next month**
 ```

@@ -173,11 +173,17 @@ $ zm recurring --months 6
 ```json
 {
   "data": [
-    { "merchant": "Netflix", "categoryPath": "Subscriptions", "currency": "EUR", "monthsSeen": 4, "windowMonths": 6, "avgAmount": 12, "lastAmount": 12, "lastDate": "2026-09-15", "periodicity": "monthly" }
+    { "merchant": "Netflix", "source": "merchant", "categoryPath": "Subscriptions", "currency": "EUR", "monthsSeen": 4, "windowMonths": 6, "avgAmount": 12, "lastAmount": 12, "lastDate": "2026-09-15", "periodicity": "monthly" }
   ],
   "meta": { "months": 6, "minMonths": 3, "from": "2026-04", "to": "2026-09", "category": null, "account": null, "currency": null, "owner": "all", "lastSyncAt": "2026-09-20T12:00:00.000Z" }
 }
 ```
+
+Real ZenMoney expenses often have no resolved merchant and no payee at all —
+the only text is a free-form comment (e.g. `"Netflix"`, `"Telegram Premium"`,
+`"iCloud"`). `recurring` (and `spend --by merchant`) fall back through
+`merchant` -> `payee` -> `originalPayee` -> `comment`, using the first
+non-empty one; `source` says which field it came from.
 
 **Budget status for a month** (from a `default.yaml` with a couple of
 limits set; `unplanned` and the rest of `meta` omitted here for brevity):

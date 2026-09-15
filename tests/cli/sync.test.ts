@@ -107,7 +107,7 @@ it('first sync sends 0, next sync sends stored serverTimestamp, --full resets', 
   const calls: any[] = []
   const t = testContext({ env: { ZENMONEY_TOKEN: 'tok' }, fetch: apiFetch([fixtureDiff(), { serverTimestamp: 1789000999 }, fixtureDiff()], calls) })
   expect(await run(['node', 'zm', 'sync'], t.ctx)).toBe(0)
-  expect(t.json().data.upserted.transaction).toBe(19)
+  expect(t.json().data.upserted.transaction).toBe(23)
   t.out.length = 0
   expect(await run(['node', 'zm', 'sync'], t.ctx)).toBe(0)
   t.out.length = 0
@@ -118,7 +118,7 @@ it('first sync sends 0, next sync sends stored serverTimestamp, --full resets', 
   // fresh diff's rows, not the old ones plus a duplicate re-insert.
   const store = Store.open(t.ctx.paths.cacheDb)
   try {
-    expect(store.all('transaction').length).toBe(19)
+    expect(store.all('transaction').length).toBe(23)
   } finally {
     store.close()
   }
@@ -139,7 +139,7 @@ it('sync --full does not wipe the cache when the fetch fails', async () => {
   const store = Store.open(t.ctx.paths.cacheDb)
   try {
     expect(store.hasData()).toBe(true)
-    expect(store.all('transaction').length).toBe(19)
+    expect(store.all('transaction').length).toBe(23)
   } finally {
     store.close()
   }
@@ -183,7 +183,7 @@ it('sync --full recovers from a corrupted cache file by deleting and recreating 
   mkdirSync(dirname(t.ctx.paths.cacheDb), { recursive: true })
   writeFileSync(t.ctx.paths.cacheDb, 'not a sqlite file')
   expect(await run(['node', 'zm', 'sync', '--full'], t.ctx)).toBe(0)
-  expect(t.json().data.upserted.transaction).toBe(19)
+  expect(t.json().data.upserted.transaction).toBe(23)
 })
 it('sync without --full surfaces NO_CACHE (exit 5) for a corrupted cache file, without touching it', async () => {
   const t = testContext({ env: { ZENMONEY_TOKEN: 'tok' } })

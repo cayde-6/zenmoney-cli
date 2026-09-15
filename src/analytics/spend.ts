@@ -1,5 +1,5 @@
 import type { Tx } from '../query/model.js'
-import { NO_CATEGORY, isSpendTx, spendSign } from '../query/model.js'
+import { NO_CATEGORY, isSpendTx, merchantLabel, spendSign } from '../query/model.js'
 import type { ZmTag } from '../api/types.js'
 import { compareNames, monthOf, round2 } from '../util.js'
 import { ZmError } from '../errors.js'
@@ -24,10 +24,15 @@ export function sumByCurrency(txs: Tx[], sign: (t: Tx) => number): Amount[] {
     .sort((a, b) => compareNames(a.currency, b.currency))
 }
 
+// 'merchant' uses the same merchant -> payee -> originalPayee -> comment
+// fallback as `zm recurring` (see query/model.ts's merchantLabel), so the two
+// commands never disagree about what a transaction's "merchant" is. The
+// '(no merchant)' bucket now only appears when all four of those fields are
+// empty.
 function keyOf(t: Tx, by: 'category' | 'month' | 'merchant'): string {
   if (by === 'category') return t.categoryPath
   if (by === 'month') return monthOf(t.date)
-  return t.merchant ?? '(no merchant)'
+  return merchantLabel(t)?.label ?? '(no merchant)'
 }
 
 function compareKeys(by: 'category' | 'month' | 'merchant', a: string, b: string): number {
