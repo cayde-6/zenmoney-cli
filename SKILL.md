@@ -41,6 +41,17 @@ those is available.
   numbers.
 - `zm status` makes no network call and needs neither a token nor a cache —
   run it first when something else isn't working.
+- **Before using `--owner` to split spend by family member, run `zm
+  owners` first** (reads the cache and the optional
+  `~/.config/zm/owners.yaml`, no network). If `data.file` is non-null,
+  `--owner` takes `all` (default), `unassigned`, or one of `data.owners[].name`
+  — not a ZenMoney login or id. If `data.file` is `null` (no `owners.yaml`),
+  `--owner` instead takes ZenMoney-user semantics: `me` (the main user of
+  the family account, i.e. the user with no parent — not necessarily
+  whoever's API token this CLI is using), `all`, a numeric user id, or a
+  login (see `zm users`). Don't guess which mode applies — `zm owners`
+  tells you directly, and an unrecognized `--owner` value exits 2 with a
+  did-you-mean hint either way.
 - **Never add amounts in different currencies.** All sums and aggregates are
   reported per currency, on purpose — a total across currencies is not a
   correct number. If the user needs one total, run `zm rates`, convert
@@ -67,17 +78,17 @@ those is available.
 ## Command reference
 
 All commands accept `--format json|table` (default `json`). `--owner
-me|all|<id>|<login>` is also a global flag, but `categories` and `rates`
-reject any value other than `all` (exit 2, `INVALID_ARGS`) since neither
-has a per-owner concept — `--owner all`, the default, is accepted as a
-no-op; every other command accepts it, though it only has an effect on
-`users`, `accounts`, `tx`, `spend`, `income`, `compare`, `recurring`,
-`budget status`, and `budget suggest` (`auth`, `sync`, `status`, and
-`budget init` accept it but it has no effect on any of them). `me` is the
-main user of the family account (the ZenMoney user with no parent) — not
-necessarily whoever's API token the CLI is using; run `zm users` to see
-who's who. Beyond `--format`, flags differ by command — they are not
-uniform across "filtering commands":
+<value>` is also a global flag — see "run `zm owners` first" above for its
+two modes — but `categories`, `rates`, and `owners` reject any value other
+than `all` (exit 2, `INVALID_ARGS`) since none of the three has a
+per-owner concept — `--owner all`, the default, is accepted as a no-op;
+every other command accepts it, though it only has an effect on `users`,
+`accounts`, `tx`, `spend`, `income`, `compare`, `recurring`, `budget
+status`, and `budget suggest` (`auth`, `sync`, `status`, and `budget init`
+accept it but it has no effect on any of them). `users` always keeps
+ZenMoney-user semantics for `--owner`, even when `owners.yaml` exists.
+Beyond `--format`, flags differ by command — they are not uniform across
+"filtering commands":
 
 - `--from YYYY-MM-DD`, `--to YYYY-MM-DD`, `--month YYYY-MM` (a period
   filter): only `tx`, `spend`, `income`.
@@ -99,10 +110,11 @@ Run `zm <command> --help` for the exact flags and examples of any command.
 | `zm sync` | `--full` | `{ upserted, deleted, full }` — `upserted` is a per-entity map of counts (e.g. `{ transaction: 12 }`), `deleted` is one total count across all entities, `full` mirrors `--full` |
 | `zm status` | – | `{ cache: { path, exists, readable, lastSyncAt, ageHours, error? }, token: { source: "env"\|"keychain"\|"config"\|null }, configDir, budgetDir, version }` — no network call, works with no token and no cache, never writes to the real cache file or its directory (reads a private temp copy instead, including any uncheckpointed WAL data; a copy torn by a concurrent write is retried a few times before `readable: false`), never prints the token itself, only its `source` |
 | `zm users` | – | `[{ id, login, currency, isMain }]` |
-| `zm accounts` | `--archived` | `[{ id, title, type, currency, balance, inBalance, archived, owner }]` |
+| `zm accounts` | `--archived` | `[{ id, title, type, currency, balance, inBalance, archived, owner }]` — `owner` is the `owners.yaml` owner name (or `null` if unassigned) once that file exists, else the ZenMoney login |
+| `zm owners` | `--archived` | `{ file: path\|null, owners: [{ name, accounts: [{ id, title }] }], unassigned: [{ id, title }] }` — reads the cache and `owners.yaml`, no network; run this first before using `--owner` by name (see "Rules for agents" above) |
 | `zm categories` | `--tree` | `[{ id, path, parentId, kind }]`, or nested `{ ...,children: [...] }` with `--tree` |
 | `zm rates` | – | `[{ currency, rate }]` relative to the main user's currency; `meta.note` marks it as current, not historical |
-| `zm tx` | `--from/--to/--month`, `--category/--account/--currency`, `--type`, `--search`, `--limit` (default 100) | `[{ id, date, type, amount, currency, categoryPath, merchant, payee, accountTitle, hold, originalPayee, ... }]` — `hold` (boolean) marks a not-yet-settled ZenMoney transaction, counted normally; `meta.total`/`meta.returned` say whether the list was cut off |
+| `zm tx` | `--from/--to/--month`, `--category/--account/--currency`, `--type`, `--search`, `--limit` (default 100) | `[{ id, date, type, amount, currency, categoryPath, merchant, payee, accountTitle, hold, originalPayee, ownerId, owner, ... }]` — `hold` (boolean) marks a not-yet-settled ZenMoney transaction, counted normally; `owner` is the `owners.yaml` owner name (`null` with no file or when unassigned), independent of `ownerId` (always the raw ZenMoney user id); `meta.total`/`meta.returned` say whether the list was cut off |
 | `zm spend` | `--from/--to/--month`, `--category/--account/--currency`, `--by category\|month\|merchant`, `--tree` | `[{ key, amounts: [{ currency, amount, count }], children? }]` — `--by merchant` uses the same merchant -> payee -> originalPayee -> comment fallback as `zm recurring`; the `(no merchant)` bucket only appears when all four are empty |
 | `zm income` | `--from/--to/--month`, `--category/--account/--currency`, `--by category\|month` | same shape as `spend`, income transactions only |
 | `zm compare` | `--category/--account/--currency`, `--period`, `--vs`, `--by total\|category` | `[{ key, currency, period, vs, diff, diffPct }]` |
@@ -119,6 +131,16 @@ zm spend --by category --month 2026-09
 zm compare --period 2026-09 --vs 2026-08 --by category
 zm budget status
 ```
+
+**Split spend by family member**
+```
+zm owners
+zm spend --by category --month 2026-09 --owner robin
+```
+`zm owners` shows whether `owners.yaml` exists and, if so, its owner names
+and which accounts map to each (plus `unassigned`). Use one of those names
+with `--owner`; with no `owners.yaml`, fall back to `--owner me|<login>`
+from `zm users` instead — don't guess which mode applies.
 
 **Find subscriptions**
 ```

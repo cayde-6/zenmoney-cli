@@ -18,7 +18,8 @@ src/
   api/          ZenMoney API client (POST /v8/diff) and the raw entity types it returns
   store/        SQLite cache: schema, diff application, meta (serverTimestamp, lastSyncAt)
   query/        query/model.ts classifies raw transactions into typed Tx and builds the Dataset;
-                query/filters.ts resolves and applies period/category/account/owner/currency/search filters
+                query/filters.ts resolves and applies period/category/account/owner/currency/search filters;
+                query/owners.ts does the module's only fs I/O (reads/validates the optional owners.yaml)
   analytics/    pure functions over Tx[]: spend/income grouping, period comparison, recurring detection
   budget/       files.ts does the module's only fs I/O (reads/validates yaml budget files); status.ts (plan vs
                 actual, reusing analytics/spend.ts's spendBy for its `unplanned` block) and suggest.ts (draft
@@ -114,6 +115,41 @@ the user with no `parent` (ZenMoney's main/family-owner user — the main user
 of the family account, not necessarily whoever's API token this CLI is
 using), `all` (the default) applies no owner filter, and any other value is
 matched against a numeric id or a login.
+
+**Why this isn't enough for every family.** ZenMoney's own per-account
+`user`/`role` fields assume the API distinguishes who owns what — in
+practice, a real family account can have every account, transaction, tag,
+and merchant carrying the same `user` (the family's main user), with `role`
+null and `private` false everywhere. In that shape, `ownerId`/`--owner
+<login>` can't separate family members at all: everything resolves to one
+person. Families in this situation typically still distinguish accounts by
+a naming convention (e.g. an emoji prefix per person in the account title),
+which ZenMoney's data model has no field for.
+
+**`<configDir>/owners.yaml`** (optional) fixes this locally, without
+ZenMoney's cooperation: it maps owner names to accounts, by account id or a
+case-insensitive substring of the account title (see `query/owners.ts`).
+`query/model.ts`'s `loadDataset` resolves this once per Dataset
+(`matchOwners`), exposing it as `Dataset.ownerNames`/`Dataset.ownerOf` and a
+new `Tx.owner` field (the owning account's owner name, or `null` when
+unassigned) — independent of the existing `ownerId`, which is always the
+ZenMoney user id regardless of `owners.yaml`. Two different owners' entries
+matching the same account is a configuration error (`INVALID_ARGS`, naming
+the account and both owners) rather than a silent, arbitrary pick.
+
+Once `owners.yaml` exists, `--owner` (`query/filters.ts`'s
+`resolveOwnerName`) switches wholesale from the ZenMoney-user semantics
+above to `all` (default) | `unassigned` | one of the file's own owner
+names, filtering on `Tx.owner` instead of `Tx.ownerId`; an unrecognized name
+gets the same did-you-mean hint as an unknown category/account. With no
+`owners.yaml` at all, every command behaves exactly as before this feature
+(`resolveOwner`, `Tx.ownerId`-based). `zm users` is deliberately exempt: it
+lists ZenMoney's own users, which have no natural mapping onto
+per-account owner names, so it keeps the old me/login/id semantics
+unconditionally. `zm owners` (reads the cache and the file, no network)
+reports the file's own `{ name, accounts }` mapping plus which accounts are
+unassigned, and is the first thing an agent should run once `owners.yaml`
+might exist.
 
 ## Caching and stale warning
 
@@ -404,3 +440,14 @@ months, and never suggesting a limit `<= 0`.
   "Owner semantics" above — this is what makes `--owner` a meaningful
   filter on a shared account rather than an artifact of who happened to
   record the transaction.
+- **`owners.yaml` matches accounts by id/title, not ZenMoney identity.**
+  When ZenMoney's own `user`/`role`/`private` fields can't separate family
+  members (see "Owner semantics"), the only signal left is however the
+  family already tells accounts apart by eye — usually a naming
+  convention. Matching by exact account id or a case-insensitive title
+  substring works with that convention as-is, needs no new ZenMoney-side
+  setup, and keeps the file readable and hand-editable. A conflict (two
+  owners' entries matching the same account) errors out rather than
+  picking one arbitrarily, for the same reason as the duplicate budget
+  limit key above: a silent pick would misattribute real spend without any
+  visible sign that it happened.

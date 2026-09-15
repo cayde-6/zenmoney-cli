@@ -131,7 +131,9 @@ $ zm spend --by category --month 2026-09
 ```
 
 **Transactions as a table** (a few columns shown; `tx` also returns `accountId`,
-`ownerId`, `categoryId`, `topCategoryId`, `categoryPath`, `payee`, `comment`,
+`ownerId`, `owner` (the owners.yaml owner name, or `null` with no
+owners.yaml or an unassigned account — see "Owners" below), `categoryId`,
+`topCategoryId`, `categoryPath`, `payee`, `comment`,
 `hold` (boolean — a not-yet-settled ZenMoney transaction, counted normally),
 `originalPayee`, and, for transfers/debts, `counterpartAccount`/
 `counterpartAmount`/`counterpartCurrency` flattened columns — in JSON these
@@ -213,6 +215,7 @@ zm sync [--full]
 zm status
 zm users
 zm accounts [--archived]
+zm owners [--archived]
 zm categories [--tree]
 zm rates
 zm tx [filters] [--type <types>] [--search <text>] [--limit <n>]  # default 100
@@ -232,11 +235,19 @@ always in sync with the installed version.
 ## Global options & filters
 
 All commands accept global `--format json|table` (default `json`) and
-`--owner me|all|<id>|<login>` (default `all`) — though `categories` and
-`rates` reject any `--owner` value other than `all` (see below) rather
-than accepting and ignoring it. `me` is the main user of the family
-account (the ZenMoney user with no parent) — not necessarily whoever's API
-token the CLI is using; run `zm users` to see who's who.
+`--owner <value>` (default `all`) — though `categories`, `rates`, and
+`owners` reject any `--owner` value other than `all` (see below) rather
+than accepting and ignoring it. `--owner` has two different sets of valid
+values, depending on whether `<configDir>/owners.yaml` exists — see
+"Owners" below for the full explanation:
+
+- **No `owners.yaml`** (the default, and everything before this feature):
+  `me|all|<id>|<login>`. `me` is the main user of the family account (the
+  ZenMoney user with no parent) — not necessarily whoever's API token the
+  CLI is using; run `zm users` to see who's who.
+- **`owners.yaml` exists**: `all|unassigned|<name>`, where `<name>` is one
+  of the file's own owner names (run `zm owners` to see them) — `me`,
+  logins, and ids are no longer accepted.
 
 Beyond that, flags are command-specific, not uniform across "filtering
 commands":
@@ -251,13 +262,93 @@ commands":
   always relative to now — it has no period flags at all.
 - `budget status`/`budget suggest` take a single `--month` (a target
   month, not a range) and no `--category`/`--account`/`--currency`.
-- `categories` and `rates` reject any `--owner` value other than `all` with
-  exit code 2 (neither has a per-owner concept), rather than silently
-  ignoring it — `--owner all` (the default) is accepted since it's a no-op.
-  Elsewhere, `--owner` only has an effect on `users`, `accounts`, `tx`,
-  `spend`, `income`, `compare`, `recurring`, `budget status`, and `budget
-  suggest` — `auth`, `sync`, `status`, and `budget init` accept the flag but
-  it has no effect on any of them.
+- `categories`, `rates`, and `owners` reject any `--owner` value other
+  than `all` with exit code 2 (none of the three has a per-owner concept —
+  `owners` *lists* owners, it isn't filtered by one), rather than silently
+  ignoring it — `--owner all` (the default) is accepted since it's a
+  no-op. Elsewhere, `--owner` only has an effect on `users`, `accounts`,
+  `tx`, `spend`, `income`, `compare`, `recurring`, `budget status`, and
+  `budget suggest` — `auth`, `sync`, `status`, and `budget init` accept the
+  flag but it has no effect on any of them. `users` is always filtered by
+  ZenMoney-user semantics (`me|all|<id>|<login>`), even when `owners.yaml`
+  exists — a file owner name has no natural mapping onto ZenMoney's own
+  user list.
+
+## Owners
+
+Some ZenMoney family accounts have no per-account ownership data at all:
+every account, transaction, tag, and merchant carries the same `user` (the
+family's main user), `role` is null, and `private` is false everywhere. In
+that shape `--owner <login>` can't separate family members — everything
+resolves to one person — even though the family itself distinguishes
+accounts by eye, typically with a naming convention like an emoji prefix
+per person.
+
+An optional `<configDir>/owners.yaml` (`~/.config/zm/owners.yaml` on
+Linux/macOS) fixes this locally:
+
+```yaml
+# owners.yaml
+owners:
+  robin:
+    accounts: ["🚗 Robin", "acc-id-123"]
+  sam:
+    accounts: ["Sam"]
+```
+
+Each `accounts` entry matches an account if it equals the account id
+exactly, or is a case-insensitive substring of the account title (after
+trimming) — entries may contain any Unicode, including emoji; only the
+owner *name* itself is restricted to `[A-Za-z0-9._-]` and can't be `all` or
+`unassigned` (both are reserved `--owner` values once the file exists). An
+account matched by entries from two different owners is a hard error
+(`INVALID_ARGS`, naming the account and both owners) rather than a silent
+pick; an account matched by no entry at all is "unassigned".
+
+Once `owners.yaml` exists:
+
+- `--owner` switches from ZenMoney-user semantics to `all` (default) |
+  `unassigned` | one of the file's own owner names — see "Global options &
+  filters" above. An unrecognized name exits 2 with a did-you-mean hint,
+  same as an unknown `--category`/`--account`.
+- Every `tx` row gains an `owner` field (the owning account's owner name,
+  or `null` when unassigned) alongside the existing `ownerId` (always the
+  raw ZenMoney user id, regardless of `owners.yaml`).
+- `zm accounts`' `owner` field reports the file's owner name (or `null`
+  when unassigned) instead of the ZenMoney login.
+- `budget status`, `budget suggest`, `spend`, `income`, `compare`,
+  `recurring`, and `tx` all filter by the new `--owner` semantics through
+  the shared filter path.
+
+With no `owners.yaml` at all, every command behaves exactly as before this
+feature — `--owner` keeps its `me|all|<id>|<login>` semantics, `tx.owner`
+is always `null`, and `zm accounts`' `owner` field stays the ZenMoney
+login.
+
+**`zm owners`** (reads the local cache and `owners.yaml`, no network — run
+this first to see the current mapping):
+
+```
+$ zm owners
+```
+
+```json
+{
+  "data": {
+    "file": "/home/you/.config/zm/owners.yaml",
+    "owners": [
+      { "name": "robin", "accounts": [{ "id": "acc-id-123", "title": "🚗 Robin" }] },
+      { "name": "sam", "accounts": [{ "id": "acc-id-456", "title": "Sam" }] }
+    ],
+    "unassigned": [{ "id": "acc-id-789", "title": "Joint Savings" }]
+  }
+}
+```
+
+With no `owners.yaml`, `data.file` is `null`, `data.owners` is `[]`, every
+non-archived account is listed under `data.unassigned`, and a `warnings`
+entry explains how to create the file. `--archived` includes archived
+accounts in both `owners[].accounts` and `unassigned`.
 
 ## Budget files
 

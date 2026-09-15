@@ -17,10 +17,23 @@ Initial release of `@cayde-6/zenmoney-cli`.
   `ZENMONEY_TOKEN`; macOS Keychain or `config.json` storage; `--logout`),
   `zm sync` (incremental and `--full`).
 - **Reference data**: `zm users`, `zm accounts` (`--archived`),
-  `zm categories` (`--tree`), `zm rates`.
+  `zm owners` (`--archived`), `zm categories` (`--tree`), `zm rates`.
 - **Transactions**: `zm tx` with period (`--from`/`--to`/`--month`),
   category (parent includes subcategories), account, currency, owner,
   `--type`, `--search`, and `--limit` filters.
+- **Owners config**: an optional `<configDir>/owners.yaml` maps owner
+  names to accounts (by id or a case-insensitive title substring) for
+  families whose ZenMoney data has no per-account ownership (every
+  account/transaction/tag/merchant carrying the same `user`). Once it
+  exists, `--owner` switches from ZenMoney-user semantics (`me|<id>|<login>`)
+  to `all`|`unassigned`|a file owner name everywhere except `zm users`
+  (which has no natural mapping onto file owner names); `tx` gains an
+  `owner` field alongside the existing `ownerId`; `zm accounts`' `owner`
+  field reports the file's owner name instead of the ZenMoney login; and
+  the new `zm owners` command (no network) reports the file's own
+  `{ name, accounts }` mapping plus which accounts are unassigned. `zm
+  status` reports `ownersFile: { path, exists }`. With no `owners.yaml`,
+  every command behaves exactly as before.
 - **Analytics**: `zm spend` (by category/month/merchant, with `--tree`),
   `zm income` (by category/month), `zm compare` (two periods, by total or
   category), `zm recurring` (subscription/recurring-payment detection).
