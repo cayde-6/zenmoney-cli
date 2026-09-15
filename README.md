@@ -393,9 +393,14 @@ accounts in both `owners[].accounts` and `unassigned`. `--format table`
 renders one `{ owner, id, title }` row per account, with a literal
 `(unassigned)` `owner` for accounts nothing matched. Two more kinds of
 `warnings` help catch a stale or overly-broad `owners.yaml`: an entry that
-matches zero accounts (a likely typo, or a renamed/closed account), and an
-entry that matches more than half of *all* accounts (`entry "x" of owner y
-matches N of M accounts` — likely broader than intended).
+matches zero accounts (a likely typo, or a renamed/closed account) — for
+any entry, emoji/symbol included; and, for a *short* text entry only (at
+most 2 letters/digits, e.g. `"Ca"`), one that matches more than half of
+*all* accounts (`entry "x" of owner y matches N of M accounts`). A longer
+text entry, or an emoji/symbol entry, is never flagged for over-matching:
+emoji/symbol entries require an exact whole-grapheme match (see above), so
+they can't over-match by accident — a shared emoji prefix across most or
+all accounts is a common, legitimate naming convention, not noise.
 
 ## Budget files
 

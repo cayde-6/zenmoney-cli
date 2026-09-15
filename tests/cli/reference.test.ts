@@ -169,13 +169,55 @@ it('zm owners warns about an entry matching zero accounts', async () => {
   expect(await run(['node', 'zm', 'owners'], t.ctx)).toBe(0)
   expect(t.json().warnings).toContain('entry "NoSuchAccountAtAll" of owner alex matches no accounts')
 })
-it('zm owners warns about an entry matching more than half of all accounts', async () => {
+it('zm owners warns about a SHORT (<= 2 letters/digits) text entry matching more than half of all accounts', async () => {
   const t = seededContext()
   // "Ca" (case-insensitive) matches Card PLN, Cash EUR, Card Partner, and
   // Old Cash — 4 of the fixture's 5 accounts (only Debts doesn't match).
   withOwnersFile(t, 'owners:\n  alex:\n    accounts: ["Ca"]\n')
   expect(await run(['node', 'zm', 'owners'], t.ctx)).toBe(0)
   expect(t.json().warnings).toContain('entry "Ca" of owner alex matches 4 of 5 accounts')
+})
+// Follow-up: a longer text entry (more than 2 letters/digits) matching most
+// of the account list is not flagged — only a SHORT entry is likely to be
+// an accidental catch-all; a longer one that happens to match a lot is
+// more plausibly intentional (e.g. a shared surname).
+it('zm owners does NOT warn about a longer (> 2 letters/digits) text entry, even if it matches more than half', async () => {
+  const t = testContext()
+  const store = Store.open(t.ctx.paths.cacheDb)
+  const diff = fixtureDiff()
+  for (const a of diff.account!) a.title = `Family ${a.title}`
+  store.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  store.close()
+  withOwnersFile(t, 'owners:\n  alex:\n    accounts: ["Family"]\n')
+  expect(await run(['node', 'zm', 'owners'], t.ctx)).toBe(0)
+  const warnings = t.json().warnings ?? []
+  expect(warnings.some((w: string) => w.includes('"Family"') && w.includes('matches') && w.includes('accounts'))).toBe(false)
+})
+// Review round follow-up: an emoji-prefix convention across most/all
+// accounts is a legitimate, common naming scheme, not noise — emoji/symbol
+// entries already require exact whole-grapheme matches (see
+// entryMatchesAccount), so they can never over-match by accident. Never
+// warn about "matches more than half" for a symbol-only entry, however
+// many accounts it matches; the zero-match warning still applies to them.
+it('zm owners never warns "matches more than half" for an emoji/symbol-only entry, even matching every account', async () => {
+  const CAR = String.fromCodePoint(0x1f697) // built from its code point, not typed literally
+  const t = testContext()
+  const store = Store.open(t.ctx.paths.cacheDb)
+  const diff = fixtureDiff()
+  for (const a of diff.account!) a.title = `${CAR} ${a.title}`
+  store.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  store.close()
+  withOwnersFile(t, `owners:\n  alex:\n    accounts: ["${CAR}"]\n`)
+  expect(await run(['node', 'zm', 'owners'], t.ctx)).toBe(0)
+  const warnings = t.json().warnings ?? []
+  expect(warnings.some((w: string) => w.includes('matches') && w.includes('accounts'))).toBe(false)
+})
+it('zm owners still warns about a zero-match emoji entry (the zero-match warning is unaffected)', async () => {
+  const HEART = String.fromCodePoint(0x2764) // built from its code point
+  const t = seededContext()
+  withOwnersFile(t, `owners:\n  alex:\n    accounts: ["Card PLN", "${HEART}"]\n`)
+  expect(await run(['node', 'zm', 'owners'], t.ctx)).toBe(0)
+  expect(t.json().warnings).toContain(`entry "${HEART}" of owner alex matches no accounts`)
 })
 
 // Review round item 2: conflicts.

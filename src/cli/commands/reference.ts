@@ -3,7 +3,7 @@ import type { AppContext } from '../context.js'
 import { addFilterOptions, readFilters, withStore } from '../program.js'
 import { categoryPath, loadDataset, meUser, type TxType } from '../../query/model.js'
 import { applyFilters, currencyWarnings, ownerNameMatches, resolveFilterRefs, resolveOwner, resolveOwnerName, resolvePeriod, usedCurrencies } from '../../query/filters.js'
-import { loadOwnersFile, ownersFilePath, entryMatchesAccount, type OwnersFile } from '../../query/owners.js'
+import { loadOwnersFile, ownersFilePath, entryMatchesAccount, letterOrDigitCount, type OwnersFile } from '../../query/owners.js'
 import { flattenTxTable } from '../output.js'
 import type { TableRow } from '../output.js'
 import { ZmError } from '../../errors.js'
@@ -66,11 +66,23 @@ function flattenOwnersTable(
   return rows
 }
 
+// A text entry (has at least one letter/digit) this short or shorter is the
+// only kind flagged by the "matches more than half" warning below — a
+// couple of letters/digits (e.g. "Ca") is plausibly an accidental
+// catch-all; a longer one that happens to match a lot of accounts (e.g. a
+// shared surname, or a household name prefix) is more plausibly deliberate.
+const SHORT_TEXT_ENTRY_MAX_LETTERS_OR_DIGITS = 2
+
 // `zm owners`-only warnings about the quality of owners.yaml's own entries
-// (as opposed to matchOwners' warnings about a real matching conflict):
-// an entry that matches nothing is almost always a typo or a renamed/closed
-// account, and an entry that matches most of the account list is likely
-// too broad to mean what its author intended. Always computed over EVERY
+// (as opposed to matchOwners' warnings about a real matching conflict): an
+// entry that matches nothing is almost always a typo or a renamed/closed
+// account (flagged regardless of entry kind). An entry that matches most of
+// the account list is *only* flagged when it's a short text entry —
+// emoji/symbol entries are matched by exact whole-grapheme alignment (see
+// entryMatchesAccount), so they can never over-match by accident (a shared
+// emoji-prefix naming convention across most/all accounts is a legitimate,
+// common pattern, not noise), and a longer text entry matching a lot is
+// more plausibly intentional than a mistake. Always computed over EVERY
 // account (archived included), independent of `--archived`, since matching
 // itself never depends on that flag either.
 function entryMatchWarnings(file: OwnersFile, accounts: ZmAccount[]): string[] {
@@ -81,7 +93,11 @@ function entryMatchWarnings(file: OwnersFile, accounts: ZmAccount[]): string[] {
       const matched = accounts.filter(a => entryMatchesAccount(entry, a)).length
       if (matched === 0) {
         warnings.push(`entry "${entry}" of owner ${name} matches no accounts`)
-      } else if (total > 0 && matched > total / 2) {
+        continue
+      }
+      const letterOrDigits = letterOrDigitCount(entry)
+      const isShortTextEntry = letterOrDigits > 0 && letterOrDigits <= SHORT_TEXT_ENTRY_MAX_LETTERS_OR_DIGITS
+      if (isShortTextEntry && total > 0 && matched > total / 2) {
         warnings.push(`entry "${entry}" of owner ${name} matches ${matched} of ${total} accounts`)
       }
     }

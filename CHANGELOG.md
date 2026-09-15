@@ -45,7 +45,11 @@ Initial release of `@cayde-6/zenmoney-cli`.
   the new `zm owners` command (no network) reports the file's own
   `{ name, accounts }` mapping plus which accounts are unassigned,
   `--format table` as `{ owner, id, title }` rows, and warns about an entry
-  matching zero accounts or more than half of all accounts. `zm status`
+  matching zero accounts (any entry), or a *short* text entry (at most 2
+  letters/digits) matching more than half of all accounts — a longer text
+  entry or any emoji/symbol entry is never flagged for over-matching, since
+  a shared emoji-prefix naming convention across most accounts is common
+  and legitimate, not a mistake. `zm status`
   reports `ownersFile: { path, exists, valid, error? }`, parsed
   independently of the cache. A directory or otherwise unreadable
   owners.yaml is a clear `INVALID_ARGS` naming the path. With no

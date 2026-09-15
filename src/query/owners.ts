@@ -156,6 +156,17 @@ function graphemes(s: string): string[] {
   return [...graphemeSegmenter.segment(s)].map(g => g.segment)
 }
 
+// How many Unicode letters/digits a (trimmed) entry contains — 0 means a
+// bare emoji/symbol entry (matched only by whole grapheme clusters, see
+// entryMatchesAccount below); `zm owners`' "matches more than half of all
+// accounts" warning uses this to skip symbol-only entries entirely (they
+// can't over-match by accident, since they require an exact whole-cluster
+// match) and to only flag a short text entry (a couple of letters/digits),
+// not a longer one that happens to legitimately match a lot of accounts.
+export function letterOrDigitCount(entry: string): number {
+  return [...entry.trim()].filter(ch => LETTER_OR_DIGIT_RE.test(ch)).length
+}
+
 // Whether `needle` (already split into graphemes) appears as a contiguous,
 // exact run of whole graphemes somewhere in `haystack` — not merely as a
 // code-point substring, which could match a fragment of a larger cluster

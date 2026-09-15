@@ -197,11 +197,20 @@ the first thing an agent should run once `owners.yaml` might exist.
 `--format table` renders one `{ owner, id, title }` row per account (a
 literal `(unassigned)` owner for accounts nothing matched), via the normal
 table mechanism (`flattenOwnersTable`) rather than falling back to a raw
-JSON dump. It also adds two entry-quality warnings, over every account
-(archived included): an entry matching zero accounts (almost always a typo
-or a renamed/closed account) and an entry matching more than half of all
-accounts (`entry "x" of owner y matches N of M accounts` — probably
-broader than intended).
+JSON dump. It also adds two entry-quality warnings (`entryMatchWarnings`),
+over every account (archived included): an entry matching zero accounts
+(almost always a typo or a renamed/closed account, flagged regardless of
+entry kind), and — for a *short* text entry only, at most
+`SHORT_TEXT_ENTRY_MAX_LETTERS_OR_DIGITS` (2) letters/digits after
+trimming, via `query/owners.ts`'s `letterOrDigitCount` — one matching more
+than half of all accounts (`entry "x" of owner y matches N of M
+accounts`). A longer text entry, or any emoji/symbol entry, is never
+flagged for over-matching: emoji/symbol entries are matched by exact
+whole-grapheme alignment (see above), so they can't over-match by
+accident, and a shared emoji prefix across most or all accounts is a
+common, legitimate family naming convention — flagging it would just be
+noise on real data. A longer text entry that happens to match a lot (e.g.
+a shared surname) is more plausibly deliberate than a short one.
 
 Both `owners.yaml` itself and its path deserve the same care as the cache:
 a directory (or otherwise unreadable file, e.g. a permission problem) at
