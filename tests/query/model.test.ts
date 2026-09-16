@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest'
-import { loadDataset, meUser, merchantLabel, type Dataset, type Tx } from '../../src/query/model.js'
+import { categoryPath, loadDataset, meUser, merchantLabel, NO_CATEGORY, type Dataset, type Tx } from '../../src/query/model.js'
 import { parseOwnersFile } from '../../src/query/owners.js'
 import { fixtureStore } from '../helpers.js'
 import { Store } from '../../src/store/store.js'
@@ -22,6 +22,33 @@ it('classifies all types', () => {
   expect(byId('t10')).toMatchObject({ type: 'expense', categoryPath: 'Uncategorized', categoryId: null })
 })
 it('sorts by date desc', () => { expect(ds().txs[0]!.id).toBe('t14') })
+// classify()'s own tag lookup (distinct from loadDataset's separate
+// catId computation): every fixture income/refund transaction happens to
+// carry a tag, so classify's `t.tag?.[0] ?? null` / `firstTagId ? ... :
+// undefined` branches for a MISSING tag are otherwise never exercised — an
+// untagged income transaction must still classify as 'income', not throw or
+// misclassify as 'refund'.
+it('classify: an income transaction with no tag at all classifies as income (not refund)', () => {
+  const s = Store.memory()
+  const diff = fixtureDiff()
+  const untaggedIncome: ZmTransaction = {
+    id: 'tNoTagIncome', user: 10, date: '2026-09-01', income: 25, outcome: 0, incomeAccount: 'acc-pln', outcomeAccount: 'acc-pln',
+    incomeInstrument: 100, outcomeInstrument: 100, tag: null, merchant: null, payee: null, comment: null,
+    deleted: false, created: 1780000000, changed: 1780000000,
+  }
+  diff.transaction!.push(untaggedIncome)
+  s.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  expect(loadDataset(s).txs.find(t => t.id === 'tNoTagIncome')!.type).toBe('income')
+})
+// loadDataset's .sort() has an id-ascending tie-break for same-date
+// transactions (model.ts:209), but it's unreachable through any real call
+// path: the only source feeding that sort is store.all('transaction'),
+// which always returns rows ORDER BY id (store.ts), and Array#sort is
+// stable in V8 — so same-date transactions always arrive already
+// id-ascending, regardless of insertion order into the diff. Deleting the
+// tie-break entirely (verified against a scratch copy) leaves the whole
+// suite green, so no test is kept for it here; see the code review that
+// flagged this (mutation testing round) for context.
 it('finds me', () => { expect(meUser(ds()).login).toBe('owner') })
 it('with no owners.yaml, ownerNames is null, ownerOf is empty, and every Tx.owner is null', () => {
   const d = ds()
@@ -64,6 +91,33 @@ it('normalises a whitespace-only comment to null', () => {
   diff.transaction!.push(whitespaceComment)
   s.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
   expect(loadDataset(s).txs.find(t => t.id === 'tWS')!.comment).toBeNull()
+})
+it('normalises a whitespace-only payee and originalPayee to null', () => {
+  const s = Store.memory()
+  const diff = fixtureDiff()
+  const whitespaceFields: ZmTransaction = {
+    id: 'tWSPayee', user: 10, date: '2026-09-01', income: 0, outcome: 5, incomeAccount: 'acc-pln', outcomeAccount: 'acc-pln',
+    incomeInstrument: 100, outcomeInstrument: 100, tag: null, merchant: null, payee: '   ', comment: null,
+    deleted: false, created: 1780000000, changed: 1780000000, originalPayee: '\t',
+  }
+  diff.transaction!.push(whitespaceFields)
+  s.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  const tx = loadDataset(s).txs.find(t => t.id === 'tWSPayee')!
+  expect(tx.payee).toBeNull()
+  expect(tx.originalPayee).toBeNull()
+})
+it('normalises a resolved merchant whose title is whitespace-only to null', () => {
+  const s = Store.memory()
+  const diff = fixtureDiff()
+  diff.merchant!.push({ id: 'm-blank', user: 10, title: '   ', changed: 1780000000 })
+  const whitespaceMerchant: ZmTransaction = {
+    id: 'tWSMerchant', user: 10, date: '2026-09-01', income: 0, outcome: 5, incomeAccount: 'acc-pln', outcomeAccount: 'acc-pln',
+    incomeInstrument: 100, outcomeInstrument: 100, tag: null, merchant: 'm-blank', payee: null, comment: null,
+    deleted: false, created: 1780000000, changed: 1780000000,
+  }
+  diff.transaction!.push(whitespaceMerchant)
+  s.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  expect(loadDataset(s).txs.find(t => t.id === 'tWSMerchant')!.merchant).toBeNull()
 })
 it('keeps payee alongside a resolved merchant, rather than dropping it', () => {
   const s = Store.memory()
@@ -108,6 +162,13 @@ it('a tag whose parent id is missing from the tag map is treated as top-level', 
   // parent id leaking through as topCategoryId.
   expect(tx.topCategoryId).toBe('orphan')
   expect(tx.categoryPath).toBe('Orphan Category')
+})
+// categoryPath is exported and called directly by callers like
+// filters.ts/analytics beyond loadDataset's own (already-validated) catId —
+// it must degrade to NO_CATEGORY for an id that resolves to nothing, not
+// throw or return an empty path.
+it('categoryPath returns NO_CATEGORY for a tag id absent from the tag map', () => {
+  expect(categoryPath('no-such-tag-at-all', ds().tags)).toBe(NO_CATEGORY)
 })
 it('a transaction whose tag id is not in the tag map is treated as uncategorized (A-16)', () => {
   const s = Store.memory()
@@ -176,6 +237,75 @@ it('debt: when the debt account is on the outcome side, the primary side is the 
   expect(tx.accountId).toBe('acc-eur')
   expect(tx.amount).toBe(60)
   expect(tx.counterpart).toMatchObject({ accountId: 'acc-debt', amount: 60 })
+})
+it('transfer: a dangling counterpart account/instrument id falls back to the raw id and empty currency', () => {
+  const s = Store.memory()
+  const diff = fixtureDiff()
+  const ghostTransfer: ZmTransaction = {
+    id: 'tGhostTransfer', user: 10, date: '2026-09-01',
+    income: 40, outcome: 40, incomeAccount: 'acc-ghost', outcomeAccount: 'acc-eur',
+    incomeInstrument: 12345, outcomeInstrument: 3 /* EUR */, tag: null, merchant: null, payee: null, comment: null,
+    deleted: false, created: 1780000000, changed: 1780000000,
+  }
+  diff.transaction!.push(ghostTransfer)
+  s.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  const tx = loadDataset(s).txs.find(t => t.id === 'tGhostTransfer')!
+  expect(tx.type).toBe('transfer')
+  expect(tx.counterpart).toMatchObject({ accountId: 'acc-ghost', accountTitle: 'acc-ghost', currency: '' })
+})
+it('debt (debt account on outcome side): an unknown outcome instrument id falls back to empty counterpart currency', () => {
+  const s = Store.memory()
+  const diff = fixtureDiff()
+  const debtUnknownInstrument: ZmTransaction = {
+    id: 'tDebtUnknownInstrument', user: 10, date: '2026-09-01',
+    income: 20, outcome: 20, incomeAccount: 'acc-eur', outcomeAccount: 'acc-debt',
+    incomeInstrument: 3 /* EUR */, outcomeInstrument: 54321, tag: null, merchant: null, payee: null, comment: null,
+    deleted: false, created: 1780000000, changed: 1780000000,
+  }
+  diff.transaction!.push(debtUnknownInstrument)
+  s.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  const tx = loadDataset(s).txs.find(t => t.id === 'tDebtUnknownInstrument')!
+  expect(tx.type).toBe('debt')
+  expect(tx.counterpart).toMatchObject({ accountId: 'acc-debt', accountTitle: 'Debts', currency: '' })
+})
+it('debt (debt account on income side): an unknown income instrument id falls back to empty counterpart currency', () => {
+  const s = Store.memory()
+  const diff = fixtureDiff()
+  const debtIncomeUnknownInstrument: ZmTransaction = {
+    id: 'tDebtIncomeUnknownInstrument', user: 10, date: '2026-09-01',
+    income: 30, outcome: 30, incomeAccount: 'acc-debt', outcomeAccount: 'acc-eur',
+    incomeInstrument: 98765, outcomeInstrument: 3 /* EUR */, tag: null, merchant: null, payee: null, comment: null,
+    deleted: false, created: 1780000000, changed: 1780000000,
+  }
+  diff.transaction!.push(debtIncomeUnknownInstrument)
+  s.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  const tx = loadDataset(s).txs.find(t => t.id === 'tDebtIncomeUnknownInstrument')!
+  expect(tx.type).toBe('debt')
+  expect(tx.accountId).toBe('acc-eur')
+  expect(tx.counterpart).toMatchObject({ accountId: 'acc-debt', accountTitle: 'Debts', currency: '' })
+})
+// The primary-side fallbacks (accountTitle/currency/ownerId) apply to any tx
+// type, not just transfer/debt counterparts — a plain expense referencing an
+// account (and instrument) id that no longer exists in the cache must still
+// produce a usable Tx instead of throwing, falling back to the raw account
+// id as the title, an empty currency, and the raw ZenMoney tx user as owner.
+it('expense: an unknown primary account/instrument id falls back to the raw id, empty currency, and the raw tx user', () => {
+  const s = Store.memory()
+  const diff = fixtureDiff()
+  const ghostExpense: ZmTransaction = {
+    id: 'tGhostExpense', user: 77, date: '2026-09-01', income: 0, outcome: 15,
+    incomeAccount: 'acc-ghost-2', outcomeAccount: 'acc-ghost-2',
+    incomeInstrument: 11111, outcomeInstrument: 11111, tag: null, merchant: null, payee: null, comment: null,
+    deleted: false, created: 1780000000, changed: 1780000000,
+  }
+  diff.transaction!.push(ghostExpense)
+  s.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  const tx = loadDataset(s).txs.find(t => t.id === 'tGhostExpense')!
+  expect(tx.type).toBe('expense')
+  expect(tx.accountId).toBe('acc-ghost-2')
+  expect(tx.accountTitle).toBe('acc-ghost-2')
+  expect(tx.currency).toBe('')
+  expect(tx.ownerId).toBe(77)
 })
 it('meUser throws NO_CACHE when the dataset has no main user', () => {
   const noMainUser: Dataset = {

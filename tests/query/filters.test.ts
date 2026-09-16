@@ -1,6 +1,6 @@
 import { it, expect } from 'vitest'
 import { loadDataset, type Dataset } from '../../src/query/model.js'
-import { applyFilters, ownerMetaValue, resolveAccount, resolveCategory, resolveFilterRefs, resolveOwner, resolveOwnerName, resolvePeriod, usedCurrencies } from '../../src/query/filters.js'
+import { applyFilters, isValidMonth, ownerMetaValue, resolveAccount, resolveCategory, resolveFilterRefs, resolveOwner, resolveOwnerName, resolvePeriod, usedCurrencies } from '../../src/query/filters.js'
 import { parseOwnersFile } from '../../src/query/owners.js'
 import type { ZmAccount } from '../../src/api/types.js'
 import { fixtureStore } from '../helpers.js'
@@ -31,6 +31,20 @@ it('period rejects impossible calendar dates and months', () => {
 })
 it('period rejects from after to', () => {
   expect(() => resolvePeriod({ from: '2026-09-12', to: '2026-09-10' })).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
+})
+// isValidMonth's own shape check (MONTH_RE), independent of the calendar
+// range check just below it — a value that doesn't even look like YYYY-MM
+// (wrong digit counts, extra text) must fail before the month-number range
+// is ever inspected.
+it('isValidMonth rejects a value that does not match the YYYY-MM shape at all', () => {
+  expect(isValidMonth('2026-9')).toBe(false)
+  expect(isValidMonth('not-a-month')).toBe(false)
+})
+// resolvePeriod validates --to independently of --from: an invalid --to
+// must be rejected even when --from is itself well-formed (the existing
+// "period" test only exercises an invalid --from).
+it('period rejects an invalid --to even when --from is valid', () => {
+  expect(() => resolvePeriod({ from: '2026-09-01', to: '09/10/2026' })).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
 })
 it('category includes children and matches by leaf title', () => {
   expect(ids({ month: '2026-09', category: 'health' })).toEqual(['t19', 't4'])
@@ -71,6 +85,24 @@ it('owner', () => {
   expect([...resolveOwner(ds, '11')!]).toEqual([11])
   expect(() => resolveOwner(ds, 'bob')).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }))
   expect(ids({ month: '2026-09', owner: 'partner' })).toEqual(['t2'])
+})
+// A digits-only owner value that doesn't match any known user id must fall
+// through to the login lookup (which also fails) rather than being accepted
+// or crashing — same "unknown owner" error as a non-numeric typo.
+it('resolveOwner: a digits-only owner that matches no user id falls through to the unknown-owner error', () => {
+  expect(() => resolveOwner(ds, '999')).toThrow(expect.objectContaining({ code: 'INVALID_ARGS', message: 'unknown owner: 999' }))
+})
+// The did-you-mean hint's candidate list falls back to the stringified user
+// id for a user with no login at all (ZenMoney allows a null login) — not
+// just the logins of users that have one.
+it('resolveOwner: the unknown-owner hint falls back to a stringified id for a user with no login', () => {
+  const anonUser = { id: 99, login: null, currency: 3, parent: 10, changed: 0 }
+  const dsWithAnon: Dataset = { ...ds, users: [...ds.users, anonUser] }
+  try { resolveOwner(dsWithAnon, 'zzz'); throw new Error('no throw') }
+  catch (e: any) {
+    expect(e.code).toBe('INVALID_ARGS')
+    expect(e.hint).toContain('99')
+  }
 })
 it('resolveOwnerName: all (default), unassigned, a known name, and an unknown name with a full-list hint', () => {
   expect(resolveOwnerName(['alex', 'sam'], 'owners.yaml', undefined)).toBe('all')
@@ -114,6 +146,24 @@ it('ownerMetaValue echoes the resolved file spelling once owners.yaml exists, el
   expect(ownerMetaValue(ds, 'me')).toBe('me') // no owners.yaml: unchanged, raw value
   expect(ownerMetaValue(ds, undefined)).toBe('all')
 })
+// ownerMetaValue re-resolves via resolveOwnerName using `ds.ownersPath ??
+// 'owners.yaml'` — a hand-built Dataset (not produced by loadDataset) can
+// have ownerNames set without a matching ownersPath, and the fallback
+// literal must be what shows up in the resulting hint.
+it('ownerMetaValue falls back to the literal "owners.yaml" when a hand-built Dataset has ownerNames but no ownersPath', () => {
+  const dsNoPath: Dataset = { ...ds, ownerNames: ['alex'], ownersPath: null }
+  expect(ownerMetaValue(dsNoPath, 'alex')).toBe('alex')
+  try { ownerMetaValue(dsNoPath, 'bob'); throw new Error('no throw') }
+  catch (e: any) { expect(e.hint).toContain('owners.yaml (owners.yaml)') }
+})
+// Same fallback, exercised through applyFilters' own inline resolveOwnerName
+// call rather than through ownerMetaValue.
+it('applyFilters falls back to the literal "owners.yaml" when a hand-built Dataset has ownerNames but no ownersPath', () => {
+  const dsNoPath: Dataset = { ...ds, ownerNames: ['alex'], ownersPath: null }
+  expect(() => applyFilters(dsNoPath, { owner: 'nope' })).toThrow(expect.objectContaining({
+    code: 'INVALID_ARGS', hint: expect.stringContaining('owners.yaml (owners.yaml)'),
+  }))
+})
 // Once owners.yaml exists, --owner switches from ZenMoney-user semantics
 // (me/login/id) to name/unassigned/all semantics, driven by Tx.owner rather
 // than Tx.ownerId — acc-pln -> alex, acc-partner -> sam, everything else
@@ -149,6 +199,9 @@ it('search matches payee even when the tx also has a resolved merchant', () => {
   }
   expect(applyFilters(dsWithPayee, { search: 'distinct payee' }).map(t => t.id)).toEqual(['p1'])
 })
+it('resolveAccount: an id that matches an account directly is returned without any title lookup', () => {
+  expect(resolveAccount(ds, 'acc-pln').title).toBe('Card PLN')
+})
 it('resolveAccount: exact title match wins over substring match', () => {
   // "Cash" is a substring of both titles, but exactly equals the first one.
   const small = accountDataset([account('a1', 'Cash'), account('a2', 'Cash Wallet')])
@@ -163,6 +216,26 @@ it('resolveAccount: ambiguous hint lists title (id) pairs', () => {
     expect(e.hint).toMatch(/Blue Wallet \(a1\)/)
     expect(e.hint).toMatch(/Green Wallet \(a2\)/)
   }
+})
+// Two DIFFERENT accounts whose (trimmed, case-insensitive) titles are both
+// an exact match for the query — as opposed to the existing ambiguous test
+// above, which only has a substring match for either account.
+it('resolveAccount: two accounts with the same exact title is ambiguous too, listing both', () => {
+  const small = accountDataset([account('a1', 'Wallet'), account('a2', '  wallet  ')])
+  try { resolveAccount(small, 'wallet'); throw new Error('no throw') }
+  catch (e: any) {
+    expect(e.code).toBe('INVALID_ARGS')
+    expect(e.message).toBe('ambiguous account: wallet')
+    expect(e.hint).toContain('(a1)')
+    expect(e.hint).toContain('(a2)')
+  }
+})
+// No exact match, but exactly one substring match — as opposed to the
+// ambiguous-substring case above, this must return that single match
+// directly instead of throwing.
+it('resolveAccount: a single substring match (no exact match) is returned directly', () => {
+  const small = accountDataset([account('a1', 'Green Wallet'), account('a2', 'Blue Purse')])
+  expect(resolveAccount(small, 'green').id).toBe('a1')
 })
 // A-21: resolving category/account once per command, not once for meta and
 // again inside applyFilters.
@@ -186,6 +259,24 @@ it('usedCurrencies includes every account currency plus both sides of every tran
   const used = usedCurrencies(ds)
   expect(used.has('PLN')).toBe(true)
   expect(used.has('EUR')).toBe(true)
+})
+// An account with no instrument at all, or with an instrument id absent from
+// the dataset (a dangling reference), contributes nothing — it must not
+// leak `undefined` into the result.
+it('usedCurrencies skips an account with no instrument, and one with an unresolved instrument id', () => {
+  const accounts = new Map(ds.accounts)
+  accounts.set('acc-no-instrument', { id: 'acc-no-instrument', user: 10, instrument: null, type: 'cash', title: 'No Instrument', balance: 0, inBalance: true, archive: false, changed: 0 })
+  accounts.set('acc-unknown-instrument', { id: 'acc-unknown-instrument', user: 10, instrument: 999999, type: 'cash', title: 'Unknown Instrument', balance: 0, inBalance: true, archive: false, changed: 0 })
+  const dsCustom: Dataset = { ...ds, accounts }
+  const used = usedCurrencies(dsCustom)
+  // Literal expected list (not a comparison against usedCurrencies(ds)):
+  // the fixture's accounts/transactions only ever use PLN and EUR (USD and
+  // RUB exist as instruments but are never referenced by any account or
+  // transaction) — asserting against ds's own output here would pass even
+  // if the account-currency loop broke in a way that affects both sides
+  // identically (e.g. were deleted outright), since dsCustom shares the
+  // same underlying transactions.
+  expect([...used].sort()).toEqual(['EUR', 'PLN'])
 })
 it('resolveAccount: no-match hint lists title (id) pairs', () => {
   const small = accountDataset([account('a1', 'Blue Wallet')])

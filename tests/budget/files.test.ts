@@ -1,8 +1,36 @@
-import { it, expect } from 'vitest'
+import { it, expect, vi, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseBudgetFile, mergeBudget, loadBudget } from '../../src/budget/files.js'
+
+// `yaml`'s ESM namespace can't be spied on directly (its exports aren't
+// configurable), so `parse` is wrapped here to let one test force a
+// non-Error throw — the only way parseBudgetFile's `e instanceof Error ?
+// e.message : String(e)` fallback arm can ever be exercised, since the real
+// `yaml` parser only ever throws actual Error instances.
+let forcedParseError: unknown
+vi.mock('yaml', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('yaml')>()
+  return {
+    ...actual,
+    parse: (text: string) => {
+      if (forcedParseError !== undefined) {
+        const e = forcedParseError
+        forcedParseError = undefined
+        throw e
+      }
+      return actual.parse(text)
+    },
+  }
+})
+
+// Unconditional reset: the mock above only clears the flag when `parse` is
+// actually reached, so a test that sets it and then throws or returns before
+// calling `parse` would otherwise leak it into the next test in this file.
+afterEach(() => {
+  forcedParseError = undefined
+})
 
 it('merges template and month', () => {
   const base = parseBudgetFile('currency: PLN\nlimits:\n  Groceries: 50000\n  Subscriptions: { amount: 15, currency: eur }\n  Health: 10000\n', 'default.yaml')
@@ -95,4 +123,44 @@ it('rejects a limit value that is neither a number nor an object (e.g. an array)
   expect(() => parseBudgetFile('limits:\n  Groceries: [1, 2]\n', 'x.yaml')).toThrow(
     expect.objectContaining({ code: 'INVALID_ARGS', message: 'x.yaml: limit "Groceries" has an invalid shape' }),
   )
+})
+it('accepts an object-form limit with no explicit currency', () => {
+  expect(parseBudgetFile('limits:\n  Groceries: { amount: 5 }\n', 'x.yaml')).toEqual({
+    limits: { Groceries: { amount: 5 } },
+  })
+})
+it('wraps a non-Error value thrown by the yaml parser using String(e)', () => {
+  forcedParseError = 'boom'
+  expect(() => parseBudgetFile('currency: PLN\n', 'x.yaml')).toThrow(
+    expect.objectContaining({ code: 'INVALID_ARGS', message: 'x.yaml: invalid yaml: boom' }),
+  )
+})
+it('treats both an empty yaml document (undefined) and an explicit null document as empty', () => {
+  expect(parseBudgetFile('', 'x.yaml')).toEqual({})
+  expect(parseBudgetFile('null\n', 'x.yaml')).toEqual({})
+})
+it('rejects a non-string top-level currency', () => {
+  expect(() => parseBudgetFile('currency: 5\n', 'x.yaml')).toThrow(
+    expect.objectContaining({ code: 'INVALID_ARGS', message: 'x.yaml: "currency" must be a string' }),
+  )
+})
+it('parses a file with only a currency and no limits key at all', () => {
+  expect(parseBudgetFile('currency: PLN\n', 'x.yaml')).toEqual({ currency: 'PLN' })
+})
+it('rejects a non-object limits value', () => {
+  expect(() => parseBudgetFile('limits: 5\n', 'x.yaml')).toThrow(
+    expect.objectContaining({ code: 'INVALID_ARGS', message: 'x.yaml: "limits" must be an object' }),
+  )
+})
+// mergeBudget and keySources must both skip a null-valued BASE limit outright
+// (distinct from the "merges template and month" test above, whose null entry
+// is in the month override, deleting a base key rather than being one itself):
+// a null base value should never reach toLimitSpec (no currency to resolve)
+// and should never be attributed to any source.
+it('loadBudget skips a null-valued base limit entirely, in both the merged map and keySources', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zm-b-'))
+  writeFileSync(join(dir, 'default.yaml'), 'currency: PLN\nlimits:\n  Ghost: null\n  Groceries: 100\n')
+  const result = loadBudget(dir, '2026-09')
+  expect([...result.limits.keys()]).toEqual(['Groceries'])
+  expect(result.keySources.has('Ghost')).toBe(false)
 })

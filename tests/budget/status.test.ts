@@ -64,6 +64,17 @@ it('unresolvedLimits still throws for an ambiguous key, rather than skipping it'
   const dupDs = { ...ds, tags: dupTags }
   expect(() => unresolvedLimits(dupDs, limits, new Map())).toThrow(expect.objectContaining({ code: 'INVALID_ARGS', message: expect.stringContaining('ambiguous') }))
 })
+it('unresolvedLimits falls back to "budget file" in its warning when keySources has no entry for the key', () => {
+  const limits = new Map([['NoSuchCategoryAnymore', { amount: 500, currency: 'EUR' }]])
+  const { warnings } = unresolvedLimits(ds, limits, new Map())
+  expect(warnings).toEqual(['unknown budget category "NoSuchCategoryAnymore" in budget file, skipped'])
+})
+it('a zero-amount planned limit reports usedPct and pace as null instead of dividing by zero', () => {
+  const limits = new Map([['Groceries', { amount: 0, currency: 'PLN' }]])
+  const row = budgetStatus(ds, limits, [], '2026-09', now).rows[0]!
+  expect(row.usedPct).toBeNull()
+  expect(row.pace).toBeNull()
+})
 it('budgetStatus reports unresolved limits passed in, defaulting to empty', () => {
   expect(budgetStatus(ds, new Map(), [], '2026-09', now).unresolved).toEqual([])
   const unresolved = [{ key: 'Nope', amount: 1, currency: 'EUR' }]

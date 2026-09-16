@@ -4,6 +4,22 @@ import { join } from 'node:path'
 import { run } from '../../src/cli/program.js'
 import { seededContext, testContext, withOwnersFile, FAMILY_OWNERS_YAML } from '../helpers.js'
 import { parseBudgetFile } from '../../src/budget/files.js'
+import { Store } from '../../src/store/store.js'
+import { fixtureDiff } from '../fixtures/diff.js'
+
+// A context whose main user (the one with no parent) has a `currency` id that
+// resolves to no known instrument at all — init/suggest both need the main
+// currency's shortTitle and must fail with NO_CACHE (not crash) when it can't
+// be resolved, same as a cache that was never fully synced.
+function contextWithUnresolvableMainCurrency(over: Parameters<typeof testContext>[0] = {}) {
+  const t = testContext(over)
+  const store = Store.open(t.ctx.paths.cacheDb)
+  const diff = fixtureDiff()
+  diff.user!.find(u => u.parent === null)!.currency = 9999 // no such instrument in the fixture
+  store.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  store.close()
+  return t
+}
 
 it('init writes template, refuses overwrite, --force overwrites', async () => {
   const t = seededContext()
@@ -30,6 +46,18 @@ it('init template uncomments into valid yaml', async () => {
   const text = readFileSync(join(t.ctx.paths.budgetDir, 'default.yaml'), 'utf8')
   const uncommented = text.split('\n').map(l => (l.startsWith('  # ') ? '  ' + l.slice('  # '.length) : l)).join('\n')
   expect(() => parseBudgetFile(uncommented, 'default.yaml')).not.toThrow()
+})
+it('init fails with NO_CACHE when the main user currency instrument cannot be resolved', async () => {
+  const t = contextWithUnresolvableMainCurrency()
+  const code = await run(['node', 'zm', 'budget', 'init'], t.ctx)
+  expect(code).toBe(5)
+  expect(t.errJson().error).toMatchObject({ code: 'NO_CACHE', message: 'cannot determine main currency', hint: 'run zm sync --full' })
+})
+it('suggest fails with NO_CACHE when the main user currency instrument cannot be resolved', async () => {
+  const t = contextWithUnresolvableMainCurrency({ now: () => new Date('2026-09-15T12:00:00') })
+  const code = await run(['node', 'zm', 'budget', 'suggest'], t.ctx)
+  expect(code).toBe(5)
+  expect(t.errJson().error).toMatchObject({ code: 'NO_CACHE', message: 'cannot determine main currency', hint: 'run zm sync --full' })
 })
 it('status right after a fresh init: comment-only limits, no plans yet', async () => {
   const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })

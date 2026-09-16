@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { run } from '../../src/cli/program.js'
 import { testContext, seededContext } from '../helpers.js'
 import { saveToken } from '../../src/auth/token.js'
+import { Store } from '../../src/store/store.js'
 
 // A-20: `zm status` — no network, works without a token and without a cache,
 // never prints the token.
@@ -79,6 +80,21 @@ it('reports the cache lastSyncAt/ageHours when a cache exists', async () => {
   expect(cache.readable).toBe(true)
   expect(cache.lastSyncAt).toBe('2026-09-15T08:00:00.000Z')
   expect(cache.ageHours).toBe(24)
+})
+// A cache file that exists and opens fine (via Store.open, which creates the
+// schema) but has never actually been synced: no `lastSyncAt` row at all.
+// Covers both readLastSyncAt's `row ? row.value : null` fallback and
+// readCacheInfo's `ageHours` null case, which can only happen together (a
+// readable cache with no lastSyncAt has no age to compute).
+it('reports lastSyncAt: null and ageHours: null for a readable cache that has never been synced', async () => {
+  const t = testContext()
+  const store = Store.open(t.ctx.paths.cacheDb)
+  store.close()
+  expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
+  const cache = t.json().data.cache
+  expect(cache.readable).toBe(true)
+  expect(cache.lastSyncAt).toBeNull()
+  expect(cache.ageHours).toBeNull()
 })
 it('reports token.source without ever printing the token itself', async () => {
   const t = testContext({ env: { ZENMONEY_TOKEN: 'super-secret-token' } })

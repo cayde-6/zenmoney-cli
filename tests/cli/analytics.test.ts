@@ -111,6 +111,11 @@ it('compare meta reports null for filters not given', async () => {
   const { t } = await zm(['compare', '--period', '2026-09', '--vs', '2026-08'])
   expect(t.json().meta).toMatchObject({ category: null, account: null, currency: null, owner: 'all' })
 })
+it('compare rejects an unknown --by', async () => {
+  const { code, t } = await zm(['compare', '--period', '2026-09', '--vs', '2026-08', '--by', 'bogus'])
+  expect(code).toBe(2)
+  expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'unknown --by: bogus' })
+})
 it('recurring', async () => {
   const t = seededContext({ now: () => new Date('2026-09-15T12:00:00') })
   expect(await run(['node', 'zm', 'recurring', '--months', '4'], t.ctx)).toBe(0)
