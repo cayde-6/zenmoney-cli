@@ -19,6 +19,17 @@ it('users', async () => {
   ])
   expect(t.json().meta.lastSyncAt).toBe('2026-09-15T08:00:00.000Z')
 })
+it('users reports currency: null when a user\'s currency instrument is missing from the cache', async () => {
+  const t = testContext()
+  const store = Store.open(t.ctx.paths.cacheDb)
+  const diff = fixtureDiff()
+  diff.user!.push({ id: 12, login: 'ghost', currency: 9999, parent: 10, changed: 1780000000 })
+  store.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  store.close()
+  const code = await run(['node', 'zm', 'users'], t.ctx)
+  expect(code).toBe(0)
+  expect(t.json().data.find((u: any) => u.id === 12)).toEqual({ id: 12, login: 'ghost', currency: null, isMain: false })
+})
 it('users --owner filters to the matching user', async () => {
   const { code, t } = await zm(['users', '--owner', 'partner'])
   expect(code).toBe(0)
@@ -79,6 +90,33 @@ it('accounts hides archived by default', async () => {
   expect(t.json().data.find((a: any) => a.id === 'acc-partner')).toEqual({ id: 'acc-partner', title: 'Card Partner', type: 'ccard', currency: 'PLN', balance: 90000, inBalance: true, archived: false, owner: 'partner' })
   const all = await zm(['accounts', '--archived'])
   expect(all.t.json().data).toHaveLength(5)
+})
+it('accounts falls back to the raw user id as owner when its user is not in the user list (no owners.yaml)', async () => {
+  const t = testContext()
+  const store = Store.open(t.ctx.paths.cacheDb)
+  const diff = fixtureDiff()
+  diff.account!.push({ id: 'acc-ghost', user: 9999, instrument: 100, type: 'cash', title: 'Ghost Account', balance: 0, inBalance: true, archive: false, changed: 1780000000 })
+  store.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  store.close()
+  const code = await run(['node', 'zm', 'accounts'], t.ctx)
+  expect(code).toBe(0)
+  expect(t.json().data.find((a: any) => a.id === 'acc-ghost').owner).toBe('9999')
+})
+it('accounts reports currency: null for an account with no instrument, and for one with an unknown instrument id', async () => {
+  const t = testContext()
+  const store = Store.open(t.ctx.paths.cacheDb)
+  const diff = fixtureDiff()
+  diff.account!.push(
+    { id: 'acc-noinst', user: 10, instrument: null, type: 'cash', title: 'No Instrument', balance: 0, inBalance: true, archive: false, changed: 1780000000 },
+    { id: 'acc-badinst', user: 10, instrument: 9999, type: 'cash', title: 'Bad Instrument', balance: 0, inBalance: true, archive: false, changed: 1780000000 },
+  )
+  store.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  store.close()
+  const code = await run(['node', 'zm', 'accounts'], t.ctx)
+  expect(code).toBe(0)
+  const data = t.json().data
+  expect(data.find((a: any) => a.id === 'acc-noinst').currency).toBeNull()
+  expect(data.find((a: any) => a.id === 'acc-badinst').currency).toBeNull()
 })
 it('accounts respects --owner', async () => {
   const { t } = await zm(['accounts', '--owner', 'partner'])
@@ -365,6 +403,17 @@ it('categories flat and tree', async () => {
   const tree = (await zm(['categories', '--tree'])).t.json().data
   expect(tree.find((c: any) => c.id === 'health').children.map((c: any) => c.id)).toEqual(['dent'])
 })
+it('categories reports kind "both" for a tag with showIncome and showOutcome both true', async () => {
+  const t = testContext()
+  const store = Store.open(t.ctx.paths.cacheDb)
+  const diff = fixtureDiff()
+  diff.tag!.push({ id: 'mixed', user: 10, title: 'Mixed', parent: null, showIncome: true, showOutcome: true, changed: 1780000000 })
+  store.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  store.close()
+  const code = await run(['node', 'zm', 'categories'], t.ctx)
+  expect(code).toBe(0)
+  expect(t.json().data.find((c: any) => c.id === 'mixed')).toMatchObject({ kind: 'both' })
+})
 it('categories --tree treats a tag with a missing (dangling) parent id as top-level', async () => {
   const t = testContext()
   const store = Store.open(t.ctx.paths.cacheDb)
@@ -400,6 +449,17 @@ it('rates relative to main user currency', async () => {
   expect(t.json().meta.note).toMatch(/current/)
   expect(t.json().data).toContainEqual({ currency: 'PLN', rate: 0.222222 })
 })
+it('rates fails with NO_CACHE when the main user currency instrument cannot be resolved', async () => {
+  const t = testContext()
+  const store = Store.open(t.ctx.paths.cacheDb)
+  const diff = fixtureDiff()
+  diff.user!.find(u => u.parent === null)!.currency = 9999
+  store.applyDiff(diff, new Date('2026-09-15T08:00:00Z'))
+  store.close()
+  const code = await run(['node', 'zm', 'rates'], t.ctx)
+  expect(code).toBe(5)
+  expect(t.errJson().error).toMatchObject({ code: 'NO_CACHE', message: 'cannot determine main currency', hint: 'run zm sync --full' })
+})
 it('rates only counts instruments used by non-deleted transactions', async () => {
   const t = testContext()
   const store = Store.open(t.ctx.paths.cacheDb)
@@ -423,6 +483,18 @@ it('tx --type rejects an empty list', async () => {
   const commaOnly = await zm(['tx', '--type', ','])
   expect(commaOnly.code).toBe(2)
   expect(commaOnly.t.errJson().error.code).toBe('INVALID_ARGS')
+})
+it('tx --type rejects an unknown type', async () => {
+  const { code, t } = await zm(['tx', '--type', 'bogus'])
+  expect(code).toBe(2)
+  expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'unknown type: bogus' })
+})
+it('tx rejects an invalid --limit', async () => {
+  for (const limit of ['0', '-1', '2.5', 'abc']) {
+    const { code, t } = await zm(['tx', '--limit', limit])
+    expect(code).toBe(2)
+    expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: `invalid limit: ${limit}` })
+  }
 })
 it('tx with filters and limit', async () => {
   const { t } = await zm(['tx', '--month', '2026-09', '--type', 'expense,refund', '--category', 'Groceries', '--limit', '2'])

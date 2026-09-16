@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `zm rates`: when the main user's currency instrument is missing from the
+  local cache, this now reports `NO_CACHE` (exit 5, hint `run zm sync
+  --full`) instead of `UNEXPECTED` (exit 1, no hint) — matching how `zm
+  budget init`/`zm budget suggest` already treat the same stale-cache
+  condition.
+
 ## [0.1.0] - 2026-09-15
 
 Initial release of `@cayde-6/zenmoney-cli`.
