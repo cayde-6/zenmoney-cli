@@ -1,8 +1,17 @@
-import { it, expect } from 'vitest'
+import { it, expect, vi } from 'vitest'
 import { mkdtempSync, statSync, readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { resolveToken, saveToken, removeToken, requireToken, macKeychain, defaultExec, type Keychain, type ExecFn } from '../../src/auth/token.js'
+
+// Spies on the real execFileSync (still calling through to it) so
+// defaultExec's stdio wiring can be asserted directly, instead of only
+// inferring it indirectly through process output.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, execFileSync: vi.fn(actual.execFileSync) }
+})
 
 function memKeychain(v: string | null = null): Keychain & { v: string | null } {
   const k = { v, get: () => k.v, set: (t: string) => { k.v = t }, remove: () => { k.v = null } }
@@ -61,6 +70,22 @@ it('config that is valid JSON but not a plain object is treated as empty', () =>
   mkdirSync(dirname(f), { recursive: true })
   writeFileSync(f, JSON.stringify(null))
   expect(resolveToken({ env: {}, keychain: null, configFile: f })).toBeNull()
+})
+
+// Regression coverage for the other arm of defaultExec's stdio ternary: no
+// `input` argument at all must produce stdio[0] = 'ignore', not 'pipe'.
+// Asserted directly against the execFileSync call (via the module spy above),
+// not just inferred from output, so collapsing the ternary to a constant
+// can't slip past unnoticed.
+it('defaultExec omits stdin input and still runs the command', () => {
+  vi.mocked(execFileSync).mockClear()
+  const out = defaultExec('node', ['-e', 'process.stdout.write("ok")'])
+  expect(out).toBe('ok')
+  expect(execFileSync).toHaveBeenCalledWith(
+    'node',
+    ['-e', 'process.stdout.write("ok")'],
+    expect.objectContaining({ stdio: ['ignore', 'pipe', 'ignore'] }),
+  )
 })
 
 it('macKeychain.set sends the token via stdin to `security -i`, never in argv', () => {

@@ -14,6 +14,7 @@ vi.mock('node:fs', async () => {
     mkdtempSync: vi.fn(actual.mkdtempSync),
     statSync: vi.fn(actual.statSync),
     copyFileSync: vi.fn(actual.copyFileSync),
+    openSync: vi.fn(actual.openSync),
   }
 })
 
@@ -23,7 +24,10 @@ vi.mock('node:fs', async () => {
 // going through the fake. `vi.hoisted` is required here rather than a plain
 // module-level `let`: `vi.mock` factories run before the rest of the module
 // body, so a factory can only close over state created the same way.
-const quickCheckOverride = vi.hoisted(() => ({ result: null as string | null }))
+// `noRow` lets a test simulate `PRAGMA quick_check` returning no row at all
+// (status.ts's `check?.quick_check ?? 'no result'` fallback), distinct from
+// `result` (a row whose `quick_check` column holds a specific string).
+const quickCheckOverride = vi.hoisted(() => ({ result: null as string | null, noRow: false }))
 
 vi.mock('node:sqlite', async () => {
   const actual = await vi.importActual<typeof import('node:sqlite')>('node:sqlite')
@@ -43,11 +47,14 @@ vi.mock('node:sqlite', async () => {
       get(target, prop, receiver) {
         if (prop === 'prepare') {
           return (sql: string) => {
-            if (quickCheckOverride.result !== null && typeof sql === 'string' && sql.trim() === 'PRAGMA quick_check') {
+            if ((quickCheckOverride.result !== null || quickCheckOverride.noRow) && typeof sql === 'string' && sql.trim() === 'PRAGMA quick_check') {
               const result = quickCheckOverride.result
               // Only `.get()` is ever called on the result of this specific
-              // query by status.ts — a minimal stand-in is enough.
-              return { get: () => ({ quick_check: result }) }
+              // query by status.ts — a minimal stand-in is enough. `noRow`
+              // simulates the query returning no row at all (`.get()`
+              // resolving to `undefined`), rather than a row with a chosen
+              // `quick_check` string.
+              return { get: () => (quickCheckOverride.noRow ? undefined : { quick_check: result }) }
             }
             return target.prepare(sql)
           }
@@ -68,7 +75,10 @@ beforeEach(async () => {
   vi.mocked(fs.statSync).mockImplementation(actualFs.statSync)
   vi.mocked(fs.copyFileSync).mockClear()
   vi.mocked(fs.copyFileSync).mockImplementation(actualFs.copyFileSync)
+  vi.mocked(fs.openSync).mockClear()
+  vi.mocked(fs.openSync).mockImplementation(actualFs.openSync)
   quickCheckOverride.result = null
+  quickCheckOverride.noRow = false
 })
 afterEach(() => { vi.restoreAllMocks() })
 
@@ -304,4 +314,165 @@ it('retries a quick_check failure like an unstable snapshot, reporting it only o
   const created = statusTempDirsCreated(vi.mocked(fs.mkdtempSync))
   expect(created).toHaveLength(3) // MAX_SNAPSHOT_ATTEMPTS: it really did retry, not fail once
   for (const dir of created) expect(actualFs.existsSync(dir)).toBe(false)
+})
+
+// status.ts's `check?.quick_check ?? 'no result'` fallback: a `PRAGMA
+// quick_check` that returns no row at all (rather than a row with some
+// non-'ok' string, already covered above) must still be treated as a failed
+// check, not throw or report 'ok'.
+it('treats PRAGMA quick_check returning no row as a failed integrity check ("no result")', async () => {
+  const fs = await import('node:fs')
+  const { run } = await import('../../src/cli/program.js')
+  const { seededContext } = await import('../helpers.js')
+  const t = seededContext()
+
+  quickCheckOverride.noRow = true
+
+  expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
+  const cache = t.json().data.cache
+  expect(cache.readable).toBe(false)
+  expect(cache.error).toBe('cache integrity check failed: no result')
+
+  const created = statusTempDirsCreated(vi.mocked(fs.mkdtempSync))
+  expect(created).toHaveLength(3) // retried like any other failed check, not reported after one attempt
+})
+
+// readWalHeader's own try/catch only special-cases ENOENT ("no -wal right
+// now") — any other error opening an existing, already access-checked `-wal`
+// must propagate as-is, not be swallowed as "no wal". Exercised by leaving
+// the real `-wal` file readable (so attemptSnapshot's own `accessSync` check
+// passes) but making the actual `openSync` call inside readWalHeader itself
+// fail with a different code.
+it('propagates a non-ENOENT error opening an existing -wal file, rather than treating it as "no wal"', async () => {
+  const fs = await import('node:fs')
+  const { run } = await import('../../src/cli/program.js')
+  const { seededContext } = await import('../helpers.js')
+  const t = seededContext()
+  actualFs.writeFileSync(`${t.ctx.paths.cacheDb}-wal`, Buffer.alloc(64, 1))
+
+  try {
+    vi.mocked(fs.openSync).mockImplementation(((path: unknown, ...rest: unknown[]) => {
+      if (typeof path === 'string' && path.endsWith('-wal')) {
+        const err = new Error('simulated I/O error opening -wal') as NodeJS.ErrnoException
+        err.code = 'EIO'
+        throw err
+      }
+      return (actualFs.openSync as (...a: unknown[]) => number)(path, ...rest)
+    }) as typeof actualFs.openSync)
+
+    expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
+    const cache = t.json().data.cache
+    expect(cache.readable).toBe(false)
+    expect(cache.error).toBe('simulated I/O error opening -wal')
+  } finally {
+    actualFs.rmSync(`${t.ctx.paths.cacheDb}-wal`, { force: true })
+  }
+})
+
+// snapshotsMatch's two `-wal`-header checks, exercised without ever writing a
+// bogus `-wal` next to the real cache (which the final successful attempt
+// would otherwise have to copy and let sqlite try to replay): `openSync` is
+// redirected, only for `-wal` paths, to real scratch files this test fully
+// controls, and `copyFileSync` is redirected, only for a `-wal` destination,
+// to a no-op — so the temp copy's own successful read never actually
+// involves a `-wal` file at all, only the already-checkpointed main db.
+it('retries when a -wal header appears between the before and after snapshot within one attempt, then succeeds', async () => {
+  const fs = await import('node:fs')
+  const { join, dirname } = await import('node:path')
+  const { run } = await import('../../src/cli/program.js')
+  const { seededContext } = await import('../helpers.js')
+  const t = seededContext({ now: () => new Date('2026-09-16T08:00:00Z') })
+
+  const scratch = join(dirname(t.ctx.paths.cacheDb), 'fake-wal-scratch')
+  actualFs.writeFileSync(scratch, Buffer.alloc(64, 7))
+
+  let walOpenCalls = 0
+  try {
+    vi.mocked(fs.openSync).mockImplementation(((path: unknown, ...rest: unknown[]) => {
+      if (typeof path === 'string' && path.endsWith('-wal')) {
+        walOpenCalls++
+        // Attempt 1's "before" sees no -wal at all; every open after that
+        // (attempt 1's "after", and both of attempt 2's) sees the same,
+        // now-stable scratch header.
+        if (walOpenCalls === 1) {
+          const err = new Error('ENOENT: no such file or directory, open') as NodeJS.ErrnoException
+          err.code = 'ENOENT'
+          throw err
+        }
+        return actualFs.openSync(scratch, 'r')
+      }
+      return (actualFs.openSync as (...a: unknown[]) => number)(path, ...rest)
+    }) as typeof actualFs.openSync)
+    vi.mocked(fs.copyFileSync).mockImplementation(((...args: unknown[]) => {
+      const [, dest] = args as [string, string]
+      if (dest.endsWith('-wal')) return // pretend the wal copy succeeded; the temp copy simply has none
+      return (actualFs.copyFileSync as (...a: unknown[]) => void)(...args)
+    }) as typeof actualFs.copyFileSync)
+
+    expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
+    const cache = t.json().data.cache
+    expect(cache.readable).toBe(true)
+    expect(cache.lastSyncAt).toBe('2026-09-15T08:00:00.000Z')
+    expect(walOpenCalls).toBeGreaterThanOrEqual(2) // the appearance was actually observed, not a fluke
+
+    // The real proof the retry happened: attempt 1's before/after mismatch
+    // (no -wal, then one appearing) forces a fresh temp dir; attempt 2 sees
+    // a stable header and succeeds. A run that never retried would create
+    // only one temp dir, and this would fail.
+    const created = statusTempDirsCreated(vi.mocked(fs.mkdtempSync))
+    expect(created).toHaveLength(2)
+    for (const dir of created) expect(actualFs.existsSync(dir)).toBe(false)
+  } finally {
+    actualFs.rmSync(scratch, { force: true })
+  }
+})
+// Same mechanism as above, but both snapshots see a -wal header (never
+// null/non-null), just with different bytes — the "a writer reset/
+// checkpointed between the two copies" case, rather than "one just appeared".
+it('retries when a -wal header\'s content changes between the before and after snapshot within one attempt, then succeeds', async () => {
+  const fs = await import('node:fs')
+  const { join, dirname } = await import('node:path')
+  const { run } = await import('../../src/cli/program.js')
+  const { seededContext } = await import('../helpers.js')
+  const t = seededContext({ now: () => new Date('2026-09-16T08:00:00Z') })
+
+  const scratchA = join(dirname(t.ctx.paths.cacheDb), 'fake-wal-scratch-a')
+  const scratchB = join(dirname(t.ctx.paths.cacheDb), 'fake-wal-scratch-b')
+  actualFs.writeFileSync(scratchA, Buffer.alloc(64, 1))
+  actualFs.writeFileSync(scratchB, Buffer.alloc(64, 2))
+
+  let walOpenCalls = 0
+  try {
+    vi.mocked(fs.openSync).mockImplementation(((path: unknown, ...rest: unknown[]) => {
+      if (typeof path === 'string' && path.endsWith('-wal')) {
+        walOpenCalls++
+        // Attempt 1's "before" sees A, "after" sees B (a change mid-attempt);
+        // attempt 2's before/after both see the now-stable B.
+        return actualFs.openSync(walOpenCalls === 1 ? scratchA : scratchB, 'r')
+      }
+      return (actualFs.openSync as (...a: unknown[]) => number)(path, ...rest)
+    }) as typeof actualFs.openSync)
+    vi.mocked(fs.copyFileSync).mockImplementation(((...args: unknown[]) => {
+      const [, dest] = args as [string, string]
+      if (dest.endsWith('-wal')) return
+      return (actualFs.copyFileSync as (...a: unknown[]) => void)(...args)
+    }) as typeof actualFs.copyFileSync)
+
+    expect(await run(['node', 'zm', 'status'], t.ctx)).toBe(0)
+    const cache = t.json().data.cache
+    expect(cache.readable).toBe(true)
+    expect(cache.lastSyncAt).toBe('2026-09-15T08:00:00.000Z')
+    expect(walOpenCalls).toBeGreaterThanOrEqual(2)
+
+    // The real proof the retry happened: attempt 1's before/after mismatch
+    // (header A, then header B) forces a fresh temp dir; attempt 2 sees a
+    // stable header and succeeds. A run that never retried would create
+    // only one temp dir, and this would fail.
+    const created = statusTempDirsCreated(vi.mocked(fs.mkdtempSync))
+    expect(created).toHaveLength(2)
+    for (const dir of created) expect(actualFs.existsSync(dir)).toBe(false)
+  } finally {
+    actualFs.rmSync(scratchA, { force: true })
+    actualFs.rmSync(scratchB, { force: true })
+  }
 })

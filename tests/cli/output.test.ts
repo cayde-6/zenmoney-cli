@@ -1,6 +1,7 @@
 import { it, expect } from 'vitest'
-import { printResult, printError } from '../../src/cli/output.js'
+import { printResult, printError, flattenGroups } from '../../src/cli/output.js'
 import { ZmError } from '../../src/errors.js'
+import type { Group } from '../../src/analytics/spend.js'
 
 it('prints json envelope', () => {
   let out = ''
@@ -75,4 +76,37 @@ it('strips redundant "error: " prefix from commander messages', () => {
   let out = ''
   printError(e, 'json', s => { out += s })
   expect(JSON.parse(out).error.message).toBe('too many arguments. Expected 0 arguments but got 1.')
+})
+it('leaves a commander message unchanged when it has no "error: " prefix to strip, even when the thrown value is not an Error', () => {
+  // Not an Error instance at all, so printError's `err instanceof Error ? err.message : String(err)`
+  // falls to String(err) — and that string doesn't start with "error: ", so stripErrorPrefix is a no-op.
+  const errLike = { code: 'commander.unknownCommand' }
+  let out = ''
+  printError(errLike, 'json', s => { out += s })
+  expect(JSON.parse(out)).toEqual({ error: { code: 'INVALID_ARGS', message: '[object Object]' } })
+})
+it('printError in table format omits the hint line when the error has none', () => {
+  let out = ''
+  printError(new ZmError('UNEXPECTED', 'boom'), 'table', s => { out += s })
+  expect(out).toBe('error: boom\n')
+})
+// flattenGroups: one row per (group, currency), plus one indented row per
+// child group's own amounts (used by `--format table` on spend/income results
+// grouped with subcategories).
+it('flattenGroups indents child-group rows under their parent, keyed by the child\'s own amounts', () => {
+  const groups: Group[] = [
+    {
+      key: 'Food',
+      amounts: [{ currency: 'USD', amount: 100, count: 2 }],
+      children: [
+        { key: 'Groceries', amounts: [{ currency: 'USD', amount: 60, count: 1 }] },
+        { key: 'Cafe', amounts: [{ currency: 'USD', amount: 40, count: 1 }] },
+      ],
+    },
+  ]
+  expect(flattenGroups(groups)).toEqual([
+    { key: 'Food', currency: 'USD', amount: 100, count: 2 },
+    { key: '  Groceries', currency: 'USD', amount: 60, count: 1 },
+    { key: '  Cafe', currency: 'USD', amount: 40, count: 1 },
+  ])
 })

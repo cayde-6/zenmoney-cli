@@ -283,7 +283,7 @@ export function registerReference(program: Command, ctx: AppContext): void {
       withStore(ctx, cmd, store => {
         const ds = loadDataset(store)
         const base = ds.instruments.get(meUser(ds).currency)
-        if (!base) throw new ZmError('UNEXPECTED', 'main user currency instrument not found')
+        if (!base) throw new ZmError('NO_CACHE', 'cannot determine main currency', 'run zm sync --full')
 
         const instrumentByShortTitle = new Map([...ds.instruments.values()].map(i => [i.shortTitle, i] as const))
         const data = [...usedCurrencies(ds)]

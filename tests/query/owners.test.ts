@@ -273,6 +273,14 @@ it('entries containing letters/digits keep plain case-insensitive substring matc
   expect(matchOwners(accounts, file).ownerOf.get('acc-1')).toBe('alex')
 })
 
+// An entry consisting only of a variation selector (no base character at
+// all) has zero letters/digits (goes down the grapheme-matching path), but
+// stripping U+FE0F from it during normalization leaves an empty grapheme
+// sequence — which must match nothing, not every account.
+it('entryMatchesAccount: an entry that is only a variation selector (no base character) matches nothing', () => {
+  expect(entryMatchesAccount(FE0F, account('acc-1', 'Some Card'))).toBe(false)
+})
+
 // entryMatchesAccount is the per-entry primitive `zm owners` uses to warn
 // about entries matching zero (or implausibly many) accounts.
 it('entryMatchesAccount exposes the same matching rule matchOwners uses internally', () => {

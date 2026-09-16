@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest'
-import { loadDataset } from '../../src/query/model.js'
+import { loadDataset, NO_CATEGORY } from '../../src/query/model.js'
 import type { Tx } from '../../src/query/model.js'
 import type { ZmTag, ZmTransaction } from '../../src/api/types.js'
 import { applyFilters } from '../../src/query/filters.js'
@@ -38,6 +38,17 @@ it('by month and merchant', () => {
   const food = applyFilters(ds, { category: 'Groceries' })
   expect(spendBy(food, 'month').map(g => [g.key, g.amounts[0]!.amount])).toEqual([['2026-06', 40000], ['2026-07', 50000], ['2026-08', 45000], ['2026-09', 4500]])
   expect(spendBy(sept, 'merchant').find(g => g.key === 'FreshMart')!.amounts).toEqual([{ currency: 'PLN', amount: 2500, count: 2 }])
+})
+// The 'by month' comparator's a>b arm is only reached when a bucket sorting
+// later was inserted before one sorting earlier — the test above always
+// feeds already-ascending months, which a stable sort never needs to swap.
+it('by month sorts months given out of chronological order back into ascending order', () => {
+  const scrambled = [
+    tx({ id: 'm1', date: '2026-03-05' }),
+    tx({ id: 'm2', date: '2026-01-05' }),
+    tx({ id: 'm3', date: '2026-02-05' }),
+  ]
+  expect(spendBy(scrambled, 'month').map(g => g.key)).toEqual(['2026-01', '2026-02', '2026-03'])
 })
 // spend --by merchant must use the same merchant -> payee -> originalPayee ->
 // comment fallback as `zm recurring` (fixture txs t20..t23: no merchant, no
@@ -126,4 +137,12 @@ it('tree treats a tag with a missing (dangling) parent as its own top-level grou
   expect(top).toBeDefined()
   expect(top!.amounts).toEqual([{ currency: 'PLN', amount: 42, count: 1 }])
   expect(top!.children).toBeUndefined()
+})
+// Distinct from the dangling-parent test above: here the top category id
+// itself has no entry at all in the tags map (rather than resolving to a tag
+// whose *parent* is dangling), so titleOf's own tags.get(id) lookup misses.
+it('tree falls back to NO_CATEGORY when a top category id has no matching tag in the map', () => {
+  const ghost = tx({ id: 'gh1', categoryId: 'ghost-id', topCategoryId: 'ghost-id', categoryPath: 'Ghost' })
+  const result = spendBy([ghost], 'category', { tree: true, tags: new Map() })
+  expect(result).toEqual([{ key: NO_CATEGORY, amounts: [{ currency: 'EUR', amount: 10, count: 1 }] }])
 })

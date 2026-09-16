@@ -19,9 +19,11 @@ Running the CLI needs Node.js >= 22.13 (`node:sqlite` without a flag). CI
 tests 22.13.0, 22, and 24 (`.github/workflows/ci.yml`); development works
 fine on any of them.
 
-Coverage thresholds (`vitest.config.ts`) are lines/statements/functions
-95%, branches 90%, over `src/**` (`src/bin.ts` excluded — see the comment
-in `vitest.config.ts`). Releasing is manual: see
+Coverage thresholds (`vitest.config.ts`) are lines 100%, functions 100%,
+statements 99%, branches 98%, over `src/**` (`src/bin.ts` excluded — see
+the comment in `vitest.config.ts`). A new uncovered line or function fails
+the run; the sub-100 statement/branch floors exist only for defensive
+fallback arms that are unreachable by construction. Releasing is manual: see
 [`docs/release-checklist.md`](docs/release-checklist.md) and
 [`docs/versioning.md`](docs/versioning.md).
 

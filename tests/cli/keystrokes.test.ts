@@ -1,4 +1,4 @@
-import { it, expect } from 'vitest'
+import { it, expect, vi } from 'vitest'
 import { applyKeystrokes, promptHidden, type HiddenInputStream } from '../../src/cli/commands/sync.js'
 
 // Pure byte-handling helper behind promptHidden's raw-mode TTY reading.
@@ -47,6 +47,10 @@ it('\\b acts as backspace, same as \\x7f', () => {
 
 it('Ctrl-D (\\x04) finishes input like Enter, not cancelled', () => {
   expect(applyKeystrokes('abc', '\x04')).toEqual({ value: 'abc', done: true, cancelled: false })
+})
+
+it('ignores a multi-byte CSI sequence with several parameter bytes before its final byte (e.g. an SGR color code)', () => {
+  expect(applyKeystrokes('ab', '\x1b[38;5;196mc')).toEqual({ value: 'abc', done: false, cancelled: false })
 })
 
 it('ignores an SS3 sequence (e.g. an arrow key sent as ESC O A)', () => {
@@ -152,4 +156,27 @@ it('promptHidden rejects with "cancelled" on Ctrl-C, still disabling raw mode', 
 it('promptHidden rejects with "empty token" if the stream ends without a terminator', async () => {
   const { stdin } = fakeStdin(['abc'])
   await expect(promptHidden('token: ', { stdin, writeErr: () => {} })).rejects.toMatchObject({ code: 'INVALID_ARGS', message: 'empty token' })
+})
+
+// With no `deps` at all, promptHidden falls back to the real process.stdin
+// and to writing process.stderr directly — the actual call shape every real
+// call site (registerSync's `auth` action) uses. process.stdin is swapped
+// out for a fake stream (same shape as fakeStdin's, above) via
+// Object.defineProperty and always restored, and process.stderr.write is
+// spied on rather than replaced outright, so nothing here ever touches a
+// real terminal or actually writes to the test runner's own stderr.
+it('promptHidden defaults to process.stdin and process.stderr.write when no deps are given', async () => {
+  const { stdin } = fakeStdin(['sec', 'ret\r'])
+  const originalStdin = Object.getOwnPropertyDescriptor(process, 'stdin')!
+  Object.defineProperty(process, 'stdin', { value: stdin, configurable: true })
+  const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  try {
+    const result = await promptHidden('token: ')
+    expect(result).toBe('secret')
+    expect(stderrWrite).toHaveBeenCalledWith('token: ')
+    expect(stderrWrite).toHaveBeenCalledWith('\n')
+  } finally {
+    Object.defineProperty(process, 'stdin', originalStdin)
+    stderrWrite.mockRestore()
+  }
 })

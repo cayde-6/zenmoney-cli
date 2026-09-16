@@ -29,10 +29,13 @@ npm run build
 | `npm run verify` | check, then build, then test:coverage — run this before opening a PR |
 
 Coverage thresholds (`vitest.config.ts`, enforced by `test:coverage`/
-`verify`) are lines/statements/functions 95%, branches 90%, over `src/**`
-(`src/bin.ts` excluded — it's only ever exercised as a spawned subprocess in
-`tests/e2e/bin.test.ts`, never in-process). CI (`.github/workflows/ci.yml`)
-runs `npm run verify` on every push/PR and uploads coverage to Codecov.
+`verify`) are lines 100%, functions 100%, statements 99%, branches 98%, over
+`src/**` (`src/bin.ts` excluded — it's only ever exercised as a spawned
+subprocess in `tests/e2e/bin.test.ts`, never in-process). A newly uncovered
+line or function fails the run; the sub-100 statement and branch floors
+exist only for defensive fallback arms that no input can reach. CI
+(`.github/workflows/ci.yml`) runs `npm run verify` on every push/PR and
+uploads coverage to Codecov.
 
 ## Project layout
 

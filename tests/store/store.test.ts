@@ -283,3 +283,79 @@ it('a directory in place of the db file surfaces as UNEXPECTED (SQLITE_CANTOPEN)
   mkdirSync(file)
   expect(() => Store.open(file)).toThrow(expect.objectContaining({ code: 'UNEXPECTED' }))
 })
+// Store.memory() has no backing file (`this.file` stays null), so a corrupt
+// row's error hint must fall back to the literal ":memory:" instead of a
+// real path — corrupt a row directly (bypassing applyDiff's JSON.stringify)
+// to reach that path without ever touching disk.
+it('corruptCacheError falls back to ":memory:" in the hint when the store has no backing file', () => {
+  const s = Store.memory()
+  s.applyDiff(fixtureDiff(), new Date())
+  ;(s as unknown as { db: DatabaseSync }).db.prepare(`UPDATE "user" SET raw = 'not json' WHERE id = '10'`).run()
+  expect(() => s.all('user')).toThrow(
+    expect.objectContaining({ code: 'NO_CACHE', hint: 'delete :memory: and run zm sync --full' }),
+  )
+})
+// Distinct from Store.open()'s own two earlier failure points (SQLITE_NOTADB
+// on a garbage file above; SQLITE_READONLY on a fully-migrated read-only file
+// below): a file whose journal_mode is already 'wal' (so re-asserting it is
+// a no-op that needs no write, even read-only) but whose schema is
+// *incomplete* forces migrate()'s own CREATE TABLE IF NOT EXISTS to attempt
+// a real write once it reaches a table that doesn't exist yet — hitting
+// Store.open()'s try/catch around store.migrate() specifically (db.close();
+// throw translateSqliteError(e, file)), not the earlier one around the pragmas.
+it('closes the db and rethrows from the migrate() failure path when the schema is incomplete and the file is read-only', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zm-'))
+  const file = join(dir, 'zm.sqlite')
+  {
+    const raw = new DatabaseSync(file)
+    raw.exec('PRAGMA journal_mode=WAL')
+    // Only the first entity table exists; migrate() reaches the next one
+    // (ENTITY_KINDS[1], 'user') and actually needs to create it.
+    raw.exec(`CREATE TABLE IF NOT EXISTS "instrument" (id TEXT PRIMARY KEY, raw TEXT NOT NULL)`)
+    raw.close()
+  }
+  chmodSync(file, 0o400)
+  try {
+    expect(() => Store.open(file)).toThrow(expect.objectContaining({ code: 'UNEXPECTED' }))
+  } finally {
+    chmodSync(file, 0o600)
+  }
+})
+// Non-transaction rows are already exercised by every other applyDiff test
+// (accounts, tags, ...); only the `it.date ?? null` fallback for a
+// transaction entry that omits `date` entirely needs its own case.
+it('stores a null date for a transaction diff entry that omits the date field', () => {
+  const s = Store.memory()
+  const tx = { ...fixtureDiff().transaction![0] } as Record<string, unknown>
+  delete tx.date
+  s.applyDiff({ serverTimestamp: 1, transaction: [tx as never] }, new Date())
+  const row = (s as unknown as { db: DatabaseSync }).db
+    .prepare(`SELECT date FROM "transaction" WHERE id = ?`)
+    .get(tx.id as string) as { date: string | null }
+  expect(row.date).toBeNull()
+})
+// reset()'s own BEGIN/DELETE/COMMIT has the same rollback-on-failure shape as
+// applyDiff's (already covered by the BigInt-serialization test above), but
+// reset() never serializes anything, so it needs its own way to fail
+// mid-transaction: a read-only file makes the first DELETE fail outright.
+it('reset() rolls back and rethrows when a DELETE fails mid-transaction', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zm-'))
+  const file = join(dir, 'zm.sqlite')
+  {
+    const s = Store.open(file)
+    s.applyDiff(fixtureDiff(), new Date())
+    s.close()
+  }
+  chmodSync(file, 0o400)
+  try {
+    const s = Store.open(file) // schema already exists: opening read-only still succeeds
+    try {
+      expect(() => s.reset()).toThrow(expect.objectContaining({ code: 'UNEXPECTED' }))
+      expect(s.all('account')).toHaveLength(5) // rolled back: fixture data still intact (read-only, so reading is still fine)
+    } finally {
+      s.close()
+    }
+  } finally {
+    chmodSync(file, 0o600)
+  }
+})

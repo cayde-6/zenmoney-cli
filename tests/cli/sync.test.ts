@@ -16,6 +16,19 @@ function apiFetch(bodies: unknown[], calls: any[] = []) {
   }) as any
 }
 
+// A minimal fake stdin, same shape as keystrokes.test.ts's own fakeStdin —
+// duplicated locally rather than imported, since that one isn't exported and
+// this is the only place in this file that needs it.
+function fakeStdin(chunks: string[]) {
+  return {
+    setRawMode: () => {},
+    resume: () => {},
+    pause: () => {},
+    setEncoding: () => {},
+    [Symbol.asyncIterator]: async function* () { for (const c of chunks) yield c },
+  }
+}
+
 it('auth --token validates and saves to config', async () => {
   const t = testContext({ fetch: apiFetch([{ serverTimestamp: 1 }]) })
   expect(await run(['node', 'zm', 'auth', '--token', 'abc'], t.ctx)).toBe(0)
@@ -68,6 +81,37 @@ it('auth propagates a ctx.readStdin() rejection (e.g. a stdin timeout) as exit 2
   })
   expect(await run(['node', 'zm', 'auth'], t.ctx)).toBe(2)
   expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'no token provided' })
+})
+// `auth`'s ctx.isTTY branch: no --token and a real terminal (not piped
+// stdin) prompts interactively via promptHidden, which itself defaults to
+// process.stdin/process.stderr — swapped out here the same way as
+// keystrokes.test.ts's own promptHidden-defaults test, and always restored.
+it('auth with no --token on a TTY prompts interactively and saves the typed token', async () => {
+  const t = testContext({ isTTY: true, fetch: apiFetch([{ serverTimestamp: 1 }]) })
+  const originalStdin = Object.getOwnPropertyDescriptor(process, 'stdin')!
+  Object.defineProperty(process, 'stdin', { value: fakeStdin(['mytoken\r']), configurable: true })
+  const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  try {
+    expect(await run(['node', 'zm', 'auth'], t.ctx)).toBe(0)
+    expect(t.json().data).toEqual({ saved: 'config' })
+  } finally {
+    Object.defineProperty(process, 'stdin', originalStdin)
+    stderrWrite.mockRestore()
+  }
+})
+it('auth with no --token on a TTY rejects an empty typed token (just pressing Enter)', async () => {
+  const t = testContext({ isTTY: true })
+  const originalStdin = Object.getOwnPropertyDescriptor(process, 'stdin')!
+  Object.defineProperty(process, 'stdin', { value: fakeStdin(['\r']), configurable: true })
+  const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  try {
+    const code = await run(['node', 'zm', 'auth'], t.ctx)
+    expect(code).toBe(2)
+    expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'empty token' })
+  } finally {
+    Object.defineProperty(process, 'stdin', originalStdin)
+    stderrWrite.mockRestore()
+  }
 })
 it('auth --token with invalid characters is rejected before any network call, without leaking the token', async () => {
   let called = false

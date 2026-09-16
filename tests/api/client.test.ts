@@ -67,6 +67,17 @@ it('never echoes the token when the underlying fetch error message contains it (
   expect(err.message).not.toContain('SECRET_TOKEN_1')
   expect(err.hint ?? '').not.toContain('SECRET_TOKEN_1')
 })
+it('does not attempt to scrub an empty token from a fetch-error message', async () => {
+  const f = (async () => { throw new TypeError('generic connection failure') }) as any
+  const err = await fetchDiff('', 0, { fetch: f, now }).catch(e => e)
+  expect(err).toMatchObject({ code: 'NETWORK' })
+  expect(err.message).toContain('generic connection failure')
+})
+it('does not attempt to scrub an empty token from a non-2xx response body', async () => {
+  const f = (async () => new Response('plain error body', { status: 500 })) as any
+  const err = await fetchDiff('', 0, { fetch: f, now }).catch(e => e)
+  expect(err).toMatchObject({ code: 'NETWORK', message: 'ZenMoney API error 500: plain error body' })
+})
 it('sends an AbortSignal so a hung request eventually surfaces as NETWORK', async () => {
   let req: any
   const f = (async (url: string, init: any) => { req = { url, init }; return new Response(JSON.stringify({ serverTimestamp: 1 }), { status: 200 }) }) as any

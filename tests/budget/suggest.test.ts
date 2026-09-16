@@ -64,6 +64,44 @@ it('one category tied across three currencies: keeps the file currency, comments
   expect(parse(text)).toEqual({ currency: 'AUD', limits: { Taxi: 4 } })
   expect(text).toMatch(/# also spent: Taxi 4 EUR\n# also spent: Taxi 4 USD\nlimits:/)
 })
+it('median of an even-length sample averages the two middle values', () => {
+  const window = { from: '2026-05', to: '2026-08' }
+  const txs: Tx[] = [
+    tx({ id: 't1', date: '2026-05-01', amount: 10 }),
+    tx({ id: 't2', date: '2026-06-01', amount: 20 }),
+    tx({ id: 't3', date: '2026-07-01', amount: 30 }),
+    tx({ id: 't4', date: '2026-08-01', amount: 40 }),
+  ]
+  const text = suggestBudget(txs, window, '2026-09', 'EUR')
+  // sorted [10,20,30,40], median = (20+30)/2 = 25
+  expect(parse(text)).toEqual({ currency: 'EUR', limits: { Taxi: 25 } })
+})
+// Distinct from the "tied across three currencies" test below: here the two
+// tied Taxi pairs are EUR and PLN, which already sort EUR-first alphabetically
+// (compareNames('EUR','PLN') < 0) — so the file currency is deliberately made
+// PLN (via an extra PLN-only Groceries category that gives PLN the higher
+// overall byCurrencyCount) to put it AFTER its rival alphabetically. Only the
+// file-currency preference (src/budget/suggest.ts:98-99) can then make PLN
+// win the tie; the alphabetical fallback alone would pick EUR. The PLN pair
+// is also listed before the EUR one here (opposite of the three-currency test
+// below) so this is the one that exercises line 99's "b is the file currency"
+// arm rather than line 98's "a is the file currency" arm — between the two
+// tests, both arms of the comparator stay covered.
+it('sort comparator: with tied recurrence, the file currency wins even though it sorts after its rival alphabetically', () => {
+  const txs: Tx[] = [
+    tx({ id: 'p1', date: '2026-06-02', currency: 'PLN', amount: 1000 }),
+    tx({ id: 'p2', date: '2026-07-02', currency: 'PLN', amount: 1000 }),
+    tx({ id: 'e1', date: '2026-06-01', currency: 'EUR', amount: 2 }),
+    tx({ id: 'e2', date: '2026-07-01', currency: 'EUR', amount: 2 }),
+    tx({ id: 'g1', date: '2026-06-03', currency: 'PLN', amount: 50, categoryPath: 'Groceries' }),
+    tx({ id: 'g2', date: '2026-07-03', currency: 'PLN', amount: 50, categoryPath: 'Groceries' }),
+  ]
+  const text = suggestBudget(txs, WINDOW, '2026-09', 'EUR')
+  const parsed = parse(text) as { currency: string; limits: Record<string, unknown> }
+  expect(parsed.currency).toBe('PLN')
+  expect(parsed.limits.Taxi).toBe(1000)
+  expect(text).toMatch(/# also spent: Taxi 2 EUR\nlimits:/)
+})
 // A-15: with no qualifying pairs at all, `currency` must still be the main
 // user's currency, not an empty string (which wouldn't even round-trip
 // through parseBudgetFile without an explicit per-limit currency).

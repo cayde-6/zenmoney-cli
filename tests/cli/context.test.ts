@@ -72,6 +72,17 @@ it('clears the timer when the stream errors before any data arrives', async () =
   }
 })
 
+// The `Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)` guard exists
+// because a stream can also deliver string chunks (e.g. once `setEncoding`
+// is used upstream) rather than only Buffers — both must accumulate correctly.
+it('accepts string data chunks, not just Buffer chunks', async () => {
+  const stream = new PassThrough()
+  stream.setEncoding('utf8') // makes 'data' emit strings instead of Buffers
+  const promise = readStdinWithTimeout(stream, 1000)
+  stream.end('hello')
+  await expect(promise).resolves.toBe('hello')
+})
+
 // realContext() wiring: paths/keychain selection driven by env/platform/home,
 // which the (test-only) overrides parameter lets these tests pin down
 // deterministically instead of depending on the host this suite runs on.
@@ -140,4 +151,23 @@ it('now() returns the current time, and fetch is wired to the real global fetch'
   expect(now).toBeGreaterThanOrEqual(before)
   expect(now).toBeLessThanOrEqual(Date.now())
   expect(ctx.fetch).toBe(globalThis.fetch)
+})
+
+// realContext()'s readStdin is `() => readStdinWithTimeout(process.stdin, 5000)` —
+// never exercised by the readStdinWithTimeout tests above, which call the
+// exported helper directly against a stream of their own. Swap the real
+// process.stdin for a PassThrough just for this test, restoring the original
+// property descriptor afterwards so nothing else in the suite is affected.
+it('readStdin reads from the real process.stdin', async () => {
+  const original = Object.getOwnPropertyDescriptor(process, 'stdin')!
+  const fake = new PassThrough()
+  Object.defineProperty(process, 'stdin', { value: fake, configurable: true })
+  try {
+    const ctx = realContext({ env: {}, platform: 'linux', home: tempHome() })
+    const promise = ctx.readStdin()
+    fake.end('piped-token')
+    await expect(promise).resolves.toBe('piped-token')
+  } finally {
+    Object.defineProperty(process, 'stdin', original)
+  }
 })
