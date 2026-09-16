@@ -1,6 +1,6 @@
 {
   "name": "@cayde-6/zenmoney-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read-only ZenMoney CLI for agents: transactions, per-currency analytics and a local budget",
   "type": "module",
   "bin": {
