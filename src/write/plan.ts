@@ -164,11 +164,12 @@ export function planDelete(targets: ZmTransaction[]): PlannedChange[] {
 }
 
 // JSON with object keys sorted recursively (arrays keep their order,
-// `undefined` object values are omitted, exactly like JSON.stringify) — so
-// planToken's hash never depends on the insertion order of a `set` object.
+// object values that are `undefined` are omitted, exactly like
+// JSON.stringify) — so planToken's hash never depends on the insertion
+// order of a `set` object.
 function canonical(value: unknown): string {
   if (Array.isArray(value)) {
-    return `[${value.map(v => canonical(v === undefined ? null : v)).join(',')}]`
+    return `[${value.map(v => canonical(v)).join(',')}]`
   }
   if (value !== null && typeof value === 'object') {
     const obj = value as Record<string, unknown>
@@ -181,7 +182,9 @@ function canonical(value: unknown): string {
 export function planToken(changes: PlannedChange[]): string {
   const rows = changes
     .map(c => ({ op: c.op, id: c.id, baseChanged: c.base?.changed ?? null, set: c.set }))
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    // ids within a plan are unique (the CLI rejects duplicates), so a strict
+    // less-than is enough to get a total order.
+    .sort((a, b) => (a.id < b.id ? -1 : 1))
   return createHash('sha256').update(canonical(rows)).digest('hex').slice(0, 16)
 }
 
