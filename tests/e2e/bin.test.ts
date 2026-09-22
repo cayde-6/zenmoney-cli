@@ -61,7 +61,7 @@ it('--help documents that --owner me is the main user, not necessarily the token
   // option description at whatever width the terminal happens to be, rather
   // than asserting an exact wrap point that shifts whenever the text grows.
   expect(zm('--help').stdout).toMatch(/main user of the family\s+account/)
-  expect(zm('--help').stdout).toMatch(/not necessarily the token\s+holder/)
+  expect(zm('--help').stdout).toMatch(/not\s+necessarily\s+the\s+token\s+holder/)
 })
 it('EPIPE from a closed stdout pipe exits quietly, with no stack trace on stderr', async () => {
   const child = spawn('node', ['dist/bin.js', 'categories', '--format', 'table'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -91,3 +91,13 @@ it('auth exits 2 within ~8s when stdin never sends data and is never closed', as
   expect(exitCode).toBe(2)
   expect(elapsedMs).toBeLessThan(8000)
 }, 15000)
+it('edit dry-run works from the built binary, no network', () => {
+  const r = zm('edit', 't1', '--comment', 'X')
+  expect(r.status).toBe(0)
+  expect(JSON.parse(r.stdout).data.applied).toBe(false)
+})
+it('edit --apply without --expect exits 2 from the built binary', () => {
+  const r = zm('edit', 't1', '--comment', 'X', '--apply')
+  expect(r.status).toBe(2)
+  expect(JSON.parse(r.stderr).error.code).toBe('INVALID_ARGS')
+})

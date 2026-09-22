@@ -12,6 +12,7 @@ import { registerReference } from './commands/reference.js'
 import { registerAnalytics } from './commands/analytics.js'
 import { registerBudget } from './commands/budget.js'
 import { registerStatus } from './commands/status.js'
+import { registerWrite } from './commands/write.js'
 import type { Filters } from '../query/filters.js'
 
 // Walks up from this file (dist/program-*.js when built, src/cli/program.ts in
@@ -55,7 +56,7 @@ function writeErrUnlessHandledElsewhere(ctx: AppContext): (s: string) => void {
 
 export function buildProgram(ctx: AppContext): Command {
   const program = new Command('zm')
-    .description('Read-only ZenMoney CLI. Agents: see SKILL.md in the package root.')
+    .description('ZenMoney CLI: read-only analysis, plus dry-run-first writes (zm edit/add/delete). Agents: see SKILL.md in the package root.')
     .version(readVersion(), '-V, --version')
     .option('--format <format>', 'json | table', 'json')
     .option('--owner <owner>', "all (default) | unassigned | an owners.yaml name (see zm owners), else me (main user of the family account, i.e. the user with no parent -- not necessarily the token holder) | user id | login", 'all')
@@ -67,6 +68,7 @@ export function buildProgram(ctx: AppContext): Command {
   registerAnalytics(program, ctx)
   registerBudget(program, ctx)
   registerStatus(program, ctx)
+  registerWrite(program, ctx)
   return program
 }
 
