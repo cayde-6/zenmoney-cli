@@ -1,5 +1,5 @@
 import { ZmError } from '../errors.js'
-import type { ZmDiff } from './types.js'
+import type { ZmDiff, ZmTransaction } from './types.js'
 
 export const DIFF_URL = 'https://api.zenmoney.ru/v8/diff/'
 
@@ -57,13 +57,18 @@ export async function fetchDiff(
   token: string,
   serverTimestamp: number,
   deps: { fetch: typeof fetch; now: () => Date; timeoutMs?: number },
+  // Entities to push up in the same request, keyed the same way as a diff
+  // response (currently only `transaction`, spread into the body next to
+  // currentClientTimestamp/serverTimestamp) — omitted entirely for a
+  // read-only sync, which today's callers still are.
+  push?: { transaction?: ZmTransaction[] },
 ): Promise<ZmDiff> {
   let res: Response
   try {
     res = await deps.fetch(DIFF_URL, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ currentClientTimestamp: Math.floor(deps.now().getTime() / 1000), serverTimestamp }),
+      body: JSON.stringify({ currentClientTimestamp: Math.floor(deps.now().getTime() / 1000), serverTimestamp, ...push }),
       signal: AbortSignal.timeout(deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     })
   } catch (e) {

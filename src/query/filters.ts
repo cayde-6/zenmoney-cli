@@ -15,7 +15,7 @@ export const MONTH_RE = /^\d{4}-\d{2}$/
 
 // Regex only checks shape; a calendar-invalid value like 2026-02-30 or a month
 // like 2026-13 must still round-trip through Date to be accepted.
-function isValidDate(s: string): boolean {
+export function isValidDate(s: string): boolean {
   if (!DATE_RE.test(s)) return false
   const [y, m, d] = s.split('-').map(Number) as [number, number, number]
   const dt = new Date(y, m - 1, d)

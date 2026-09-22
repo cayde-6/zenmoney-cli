@@ -158,6 +158,10 @@ it('now() returns the current time, and fetch is wired to the real global fetch'
 // exported helper directly against a stream of their own. Swap the real
 // process.stdin for a PassThrough just for this test, restoring the original
 // property descriptor afterwards so nothing else in the suite is affected.
+it('realContext.uuid returns a v4 uuid', () => {
+  expect(realContext({ env: {} }).uuid()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+})
+
 it('readStdin reads from the real process.stdin', async () => {
   const original = Object.getOwnPropertyDescriptor(process, 'stdin')!
   const fake = new PassThrough()

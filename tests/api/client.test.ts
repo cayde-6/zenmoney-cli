@@ -137,6 +137,13 @@ it('appends a sanitized cause.code to the message when the underlying fetch erro
   expect(err).toMatchObject({ code: 'NETWORK' })
   expect(err.message).toContain('ENOTFOUND')
 })
+it('fetchDiff sends push entities in the body', async () => {
+  const calls: any[] = []
+  const f = (async (_u: string, init: any) => { calls.push(JSON.parse(init.body)); return new Response(JSON.stringify({ serverTimestamp: 5 }), { status: 200 }) }) as any
+  const tx = { id: 'x' } as any
+  await fetchDiff('tok', 4, { fetch: f, now: () => new Date(1000_000) }, { transaction: [tx] })
+  expect(calls[0]).toEqual({ currentClientTimestamp: 1000, serverTimestamp: 4, transaction: [tx] })
+})
 it('still scrubs the token even when a cause.code is appended', async () => {
   const f = (async () => {
     throw new TypeError('Headers.append: "Bearer SECRET_TOKEN_4" is an invalid header value.', { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } })

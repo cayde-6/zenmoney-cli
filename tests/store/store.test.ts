@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../../src/store/store.js'
 import { fixtureDiff } from '../fixtures/diff.js'
+import { fixtureStore } from '../helpers.js'
 
 it('applies a full diff', () => {
   const s = Store.memory()
@@ -333,6 +334,14 @@ it('stores a null date for a transaction diff entry that omits the date field', 
     .prepare(`SELECT date FROM "transaction" WHERE id = ?`)
     .get(tx.id as string) as { date: string | null }
   expect(row.date).toBeNull()
+})
+it('getTransaction returns the raw row, deleted ones included, or null', () => {
+  const s = fixtureStore()
+  expect(s.getTransaction('t1')?.id).toBe('t1')
+  const raw = { ...s.getTransaction('t1')!, deleted: true, changed: 1790000000 }
+  s.applyDiff({ serverTimestamp: 1789000001, transaction: [raw] }, new Date())
+  expect(s.getTransaction('t1')?.deleted).toBe(true)
+  expect(s.getTransaction('nope')).toBeNull()
 })
 // reset()'s own BEGIN/DELETE/COMMIT has the same rollback-on-failure shape as
 // applyDiff's (already covered by the BigInt-serialization test above), but
