@@ -1,9 +1,11 @@
 # Architecture
 
-`zm` is a read-only CLI over a ZenMoney account: it downloads a diff of the
-account into a local SQLite cache, classifies each raw transaction into a
-typed model, and runs pure, per-currency analytics and a local budget check
-against that model. This document describes the module map, data flow,
+`zm` is a CLI over a ZenMoney account: it downloads a diff of the account
+into a local SQLite cache, classifies each raw transaction into a typed
+model, and runs pure, per-currency analytics and a local budget check
+against that model for reading — plus dry-run-first transaction writes
+(`zm edit`/`zm add`/`zm delete`, see "Write flow" below) on top of that
+same cache and model. This document describes the module map, data flow,
 classification rules, and the design decisions behind them, as the current
 code (`src/`) implements them.
 
@@ -197,11 +199,21 @@ again.
 6. `store.applyDiff` the response. If that throws (e.g. `CACHE_BUSY`,
    `SQLITE_FULL`) after the POST already succeeded, `runWrite` still
    reports `applied: true`, with a `warnings` entry: `"written to
-   ZenMoney, but the local cache was not updated: run zm sync"`.
-7. A network failure during the POST (step 5) is re-thrown as `NETWORK`
-   with hint `"the change may have been written; run the same command
-   again, it is safe to retry"` — see "Retry detection" above for why
-   that's actually true. `zm` never retries automatically on its own.
+   ZenMoney, but the local cache was not updated: run zm sync"`. Then, for
+   every pending change whose id the response's `transaction` array
+   doesn't contain, a `warnings` entry names it and points at `zm sync
+   --full` — see "API facts" below (fact 5) for why.
+7. A failure during the POST (step 5) is re-thrown as `NETWORK` (exit 4),
+   with a hint that depends on what kind of failure it was: a transport
+   failure, an HTTP 5xx, or a malformed/unparseable response leave the
+   write's outcome genuinely unknown, so the hint is `"the change may have
+   been written; run the same command again, it is safe to retry"` — see
+   "Retry detection" above for why that's actually true. An HTTP 4xx means
+   ZenMoney rejected the request outright before writing anything (401/403
+   are handled earlier, as `AUTH`, not `NETWORK`), so the hint is instead
+   `"ZenMoney rejected the write; nothing was changed. Rerun without
+   --apply to review the plan"`. `zm` never retries automatically on its
+   own.
 
 The window between step 2 (sync) and step 5 (POST) — a change landing on
 the server in between, from the app or another process — cannot be closed
@@ -240,6 +252,14 @@ object, sync semantics) and the open-source client zerro
    outcomeAccount, outcome, date`. `plan.ts: planAdd` sets exactly these
    plus whichever optional ones the caller passed (`tag`, `payee`,
    `comment`), always with `merchant: null` and `hold: false`.
+5. **Echo**: per fact 3 above, the response diff's `transaction` array
+   should include every transaction the request just wrote. Confidence
+   medium-high, same as fact 1, so `runWrite` treats it as a fact to
+   verify rather than trust outright: after `--apply`, for every pending
+   change whose id the response's `transaction` array doesn't contain, a
+   `warnings` entry names it and points at `zm sync --full`. The push
+   payload itself is never written into the local cache directly — only
+   what `store.applyDiff` actually applies from the response is.
 
 ## Transaction classification
 

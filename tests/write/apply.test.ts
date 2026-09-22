@@ -29,11 +29,13 @@ it('dry-run: no fetch call, applied false, applyCommand contains --expect <token
   expect(data.applyCommand).toBe(`zm edit t1 --comment New --apply --expect ${data.token}`)
 })
 
-it('dry-run warns "nothing to change" when every target already matches the planned state', async () => {
+it('dry-run warns "nothing to change" when every target already matches the planned state, applyCommand null', async () => {
   const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' }, fetch: noopThrowFetch })
   const samePlan: Planner = (store, ds) => planEdit(ds, [store.getTransaction('t1')!], { accountId: 'acc-pln' })
   await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--account', 'acc-pln'], apply: false, expect: undefined, plan: samePlan })
-  expect(t.json().warnings).toContain('nothing to change: already in that state')
+  const { data, warnings } = t.json()
+  expect(warnings).toContain('nothing to change: already in that state')
+  expect(data.applyCommand).toBeNull()
 })
 
 it('--apply without --expect throws INVALID_ARGS before opening the store', async () => {
@@ -329,4 +331,93 @@ it('a push response missing the impacted account adds a balance warning; one tha
     await runWrite(t.ctx, { format: 'json', argv: ['add', '--expense', '12.50', '--account', 'acc-pln', '--id', uuid], apply: true, expect: token, plan: addPlan })
     expect(t.json().warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining('did not include an updated balance')]))
   }
+})
+
+it('a push response missing the written transaction adds an echo warning; one that includes it does not', async () => {
+  const syncResponse = fixtureDiff()
+
+  {
+    const calls: any[] = []
+    const pushResponse = { serverTimestamp: 1789000100 } // no `transaction` key at all, let alone an echo of t1
+    const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' }, now: () => NOW, fetch: apiFetch([syncResponse, pushResponse], calls) })
+    await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: false, expect: undefined, plan: editT1 })
+    const token = t.json().data.token
+    t.out.length = 0
+    await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: true, expect: token, plan: editT1 })
+    expect(t.json().warnings).toContain(
+      'transaction t1: the server response did not echo this write; run zm sync --full to be sure the local cache matches ZenMoney',
+    )
+  }
+  {
+    const calls: any[] = []
+    const changed = Math.max(NOW_SEC, T1_CHANGED + 1)
+    const pushedT1 = { ...fixtureStore().getTransaction('t1')!, comment: 'New', changed }
+    const pushResponse = { serverTimestamp: 1789000100, transaction: [pushedT1] }
+    const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' }, now: () => NOW, fetch: apiFetch([syncResponse, pushResponse], calls) })
+    await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: false, expect: undefined, plan: editT1 })
+    const token = t.json().data.token
+    t.out.length = 0
+    await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: true, expect: token, plan: editT1 })
+    expect(t.json().warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining('did not echo this write')]))
+  }
+})
+
+it('400 on push exits NETWORK with the "ZenMoney rejected the write" hint (nothing changed)', async () => {
+  const syncResponse = fixtureDiff()
+  let n = 0
+  const fetchFn = (async (_url: string, init: any) => {
+    n++
+    if (n === 1) return new Response(JSON.stringify(syncResponse), { status: 200 })
+    return new Response('bad request', { status: 400 })
+  }) as unknown as typeof fetch
+  const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' }, now: () => NOW, fetch: fetchFn })
+
+  await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: false, expect: undefined, plan: editT1 })
+  const token = t.json().data.token
+  t.out.length = 0
+
+  await expect(
+    runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: true, expect: token, plan: editT1 }),
+  ).rejects.toMatchObject({
+    code: 'NETWORK',
+    hint: 'ZenMoney rejected the write; nothing was changed. Rerun without --apply to review the plan',
+  })
+})
+
+it('503 on push exits NETWORK with the "safe to retry" hint', async () => {
+  const syncResponse = fixtureDiff()
+  let n = 0
+  const fetchFn = (async (_url: string, init: any) => {
+    n++
+    if (n === 1) return new Response(JSON.stringify(syncResponse), { status: 200 })
+    return new Response('unavailable', { status: 503 })
+  }) as unknown as typeof fetch
+  const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' }, now: () => NOW, fetch: fetchFn })
+
+  await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: false, expect: undefined, plan: editT1 })
+  const token = t.json().data.token
+  t.out.length = 0
+
+  await expect(
+    runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: true, expect: token, plan: editT1 }),
+  ).rejects.toMatchObject({ code: 'NETWORK', hint: expect.stringContaining('safe to retry') })
+})
+
+it('malformed push response ("invalid response from ZenMoney") exits NETWORK with the "safe to retry" hint', async () => {
+  const syncResponse = fixtureDiff()
+  let n = 0
+  const fetchFn = (async (_url: string, init: any) => {
+    n++
+    if (n === 1) return new Response(JSON.stringify(syncResponse), { status: 200 })
+    return new Response(JSON.stringify({ no: 'serverTimestamp here' }), { status: 200 })
+  }) as unknown as typeof fetch
+  const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' }, now: () => NOW, fetch: fetchFn })
+
+  await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: false, expect: undefined, plan: editT1 })
+  const token = t.json().data.token
+  t.out.length = 0
+
+  await expect(
+    runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: true, expect: token, plan: editT1 }),
+  ).rejects.toMatchObject({ code: 'NETWORK', hint: expect.stringContaining('safe to retry') })
 })

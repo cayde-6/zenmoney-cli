@@ -49,7 +49,12 @@ export function parseAmount(raw: string, flag: string): number {
 // classify-based transfer/debt check is skipped for those, and only the
 // instrument/op-field checks below apply.
 export function isRestricted(t: ZmTransaction, ds: Dataset): boolean {
-  if (!(t.income === 0 && t.outcome === 0)) {
+  if (t.income === 0 && t.outcome === 0) {
+    // A zero-money row still moving between two different accounts is a
+    // zero-money transfer, restricted the same as a money-carrying one --
+    // classify() itself can't be used to tell (see the comment above).
+    if (t.incomeAccount !== t.outcomeAccount) return true
+  } else {
     const type = classify(t, ds.accounts, ds.tags)
     if (type === 'transfer' || type === 'debt') return true
   }

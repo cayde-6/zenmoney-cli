@@ -9,17 +9,11 @@
 import type { Command } from 'commander'
 import type { AppContext } from '../context.js'
 import { formatOf } from '../program.js'
-import { runWrite, type Planner } from '../../write/apply.js'
+import { runWrite, RERUN_HINT, type Planner } from '../../write/apply.js'
 import { planEdit, planAdd, planDelete, parseAmount, isApplied, UUID_RE, type EditFields, type AddInput, type PlannedChange } from '../../write/plan.js'
 import { resolveCategory, resolveAccount, isValidDate } from '../../query/filters.js'
 import { ZmError } from '../../errors.js'
 import type { ZmTransaction } from '../../api/types.js'
-
-// Same wording as runWrite's own CONFLICT hint (src/write/apply.ts) -- used
-// here so the add Planner's own "already exists with different content"
-// CONFLICT (thrown below, before runWrite ever gets a chance to) gives the
-// caller identical guidance to every CONFLICT runWrite itself throws.
-const RERUN_HINT = 'rerun without --apply to review the current state'
 
 function requireOwnerAll(cmd: Command, name: string): void {
   if (cmd.optsWithGlobals().owner !== 'all') {
@@ -173,6 +167,11 @@ export function registerWrite(program: Command, ctx: AppContext): void {
       if (opts.apply && opts.id === undefined) {
         throw new ZmError('INVALID_ARGS', '--apply requires --id <uuid>', 'run the command without --apply first and use the applyCommand it prints')
       }
+      // Lowercased before validating/using it, so an upper-case (or mixed-
+      // case) --id still matches UUID_RE, and every later use -- the plan,
+      // the rebuilt argv, the printed applyCommand -- sees the same
+      // canonical form a retried --apply would also produce.
+      if (opts.id !== undefined) opts.id = opts.id.toLowerCase()
       if (opts.id !== undefined && !UUID_RE.test(opts.id)) {
         throw new ZmError('INVALID_ARGS', `invalid --id: ${opts.id}`, 'must be a UUID, e.g. 3b67e2c0-1234-4abc-9def-1234567890ab')
       }

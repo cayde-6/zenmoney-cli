@@ -158,6 +158,11 @@ it('isRestricted skips the classify rule (only) for a zero-money row', () => {
   expect(isRestricted(zero, ds)).toBe(false)
 })
 
+it('isRestricted flags a zero-money row whose income/outcome accounts differ (a zero-money transfer)', () => {
+  const zeroTransfer = { ...t1, income: 0, outcome: 0, incomeAccount: 'acc-pln', outcomeAccount: 'acc-eur' }
+  expect(isRestricted(zeroTransfer, ds)).toBe(true)
+})
+
 it('planAdd builds a full single-currency object', () => {
   const [c] = planAdd(ds, { id: 'new-id', kind: 'expense', amount: 42.5, accountId: 'acc-pln', date: '2026-09-20' })
   expect(c!.op).toBe('create')

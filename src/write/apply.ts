@@ -24,16 +24,25 @@ import { applyCommand, balanceImpact, changeViews, tableRows, type WriteData } f
 // it and works with whatever PlannedChange rows come back.
 export type Planner = (store: Store, ds: Dataset, o: { postSync: boolean }) => PlannedChange[]
 
-const RERUN_HINT = 'rerun without --apply to review the current state'
+export const RERUN_HINT = 'rerun without --apply to review the current state'
+
+// Only a transport failure, an HTTP 5xx, or a malformed/unparseable
+// response leave the write's outcome genuinely unknown - the POST may or
+// may not have landed, so the safe move is retrying the exact same
+// command. An HTTP 4xx means ZenMoney rejected the request outright before
+// writing anything, so retrying the same --apply would just fail again;
+// the hint instead points back at the plan.
+const RETRY_HINT = 'the change may have been written; run the same command again, it is safe to retry'
+const REJECTED_HINT = 'ZenMoney rejected the write; nothing was changed. Rerun without --apply to review the plan'
 
 // Splits a plan into the changes that still need to happen and the ids of
-// the ones that are already in their target state (see the lead ruling in
-// the design spec's write flow: a target already matching the request is
-// dropped from what gets sent, never treated as blocking the rest - a
-// multi-target edit where only some targets still need the change must
-// still be applicable, not stuck in a permanent conflict loop against
-// itself). Shared by the dry-run and --apply branches below, which both
-// need to work with `pending` rather than the full plan from here on.
+// the ones that are already in their target state (a target already
+// matching the request is dropped from what gets sent, never treated as
+// blocking the rest - a multi-target edit where only some targets still
+// need the change must still be applicable, not stuck in a permanent
+// conflict loop against itself). Shared by the dry-run and --apply
+// branches below, which both need to work with `pending` rather than the
+// full plan from here on.
 function splitPending(store: Store, changes: PlannedChange[]): { pending: PlannedChange[]; alreadyIds: string[] } {
   const pending: PlannedChange[] = []
   const alreadyIds: string[] = []
@@ -68,7 +77,7 @@ export async function runWrite(ctx: AppContext, opts: {
       const data: WriteData = {
         applied: false,
         token,
-        applyCommand: applyCommand(opts.argv, token),
+        applyCommand: pending.length > 0 ? applyCommand(opts.argv, token) : null,
         changes: changeViews(ds, pending),
         balanceImpact: balanceImpact(ds, pending),
       }
@@ -114,9 +123,9 @@ export async function runWrite(ctx: AppContext, opts: {
     const { pending } = splitPending(store, changes)
 
     if (pending.length === 0) {
-      // Every target already matches the requested state - as today,
-      // reported against the full plan (there's nothing left "pending" to
-      // narrow it to), no POST made.
+      // Every target already matches the requested state - reported
+      // against the full plan (there's nothing left "pending" to narrow it
+      // to), no POST made.
       warnings.push('already applied')
       const data: WriteData = {
         applied: true,
@@ -155,7 +164,8 @@ export async function runWrite(ctx: AppContext, opts: {
       response = await fetchDiff(token, store.getMeta().serverTimestamp, deps, { transaction: payload })
     } catch (e) {
       if (e instanceof ZmError && e.code === 'NETWORK') {
-        throw new ZmError('NETWORK', e.message, 'the change may have been written; run the same command again, it is safe to retry')
+        const hint = e.message.startsWith('ZenMoney API error 4') ? REJECTED_HINT : RETRY_HINT
+        throw new ZmError('NETWORK', e.message, hint)
       }
       throw e
     }
@@ -164,6 +174,19 @@ export async function runWrite(ctx: AppContext, opts: {
       store.applyDiff(response, ctx.now())
     } catch {
       warnings.push('written to ZenMoney, but the local cache was not updated: run zm sync')
+    }
+
+    // Echo safety net: the response diff is expected to include every
+    // transaction this POST just wrote, but that's a fact to verify rather
+    // than trust outright (see the design spec's API facts) - flag any
+    // pending change whose id the response doesn't echo back, rather than
+    // silently assuming it landed exactly as sent. The payload itself is
+    // never written into the cache directly; only what applyDiff above
+    // actually applied from the response is.
+    for (const c of pending) {
+      if (!(response.transaction ?? []).some(t => t.id === c.id)) {
+        warnings.push(`transaction ${c.id}: the server response did not echo this write; run zm sync --full to be sure the local cache matches ZenMoney`)
+      }
     }
 
     // Balance safety net: the server maintains account.balance but a

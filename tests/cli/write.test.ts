@@ -95,6 +95,15 @@ it('add --id not matching UUID_RE is rejected before the cache is opened', async
   expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'invalid --id: not-a-uuid' })
 })
 
+it('add --id is lowercased before validating/using it', async () => {
+  const upper = '3B67E2C0-1234-4ABC-9DEF-1234567890AB'
+  const { code, t } = await zm(['add', '--expense', '10', '--account', 'Card PLN', '--id', upper])
+  expect(code).toBe(0)
+  const { data } = t.json()
+  expect(data.applyCommand).toContain(upper.toLowerCase())
+  expect(data.applyCommand).not.toContain(upper)
+})
+
 it('edit with no field flag is rejected before the cache is opened', async () => {
   const t = noCache()
   const code = await run(['node', 'zm', 'edit', 't1'], t.ctx)
@@ -516,6 +525,7 @@ it('delete: target already gone by --apply time (removed by sync via a deletion 
   // The synthetic post-sync change (base: null, next: { id, deleted: true })
   // must not leak a bogus balanceImpact entry or a `raw: null` key.
   expect(out.data.balanceImpact).toEqual([])
+  expect(out.data.changes).toHaveLength(1)
   for (const change of out.data.changes) {
     expect('raw' in change).toBe(false)
   }

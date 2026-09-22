@@ -554,13 +554,22 @@ check runs again during `--apply`, in case it exists by then even though
 it didn't at dry-run time).
 
 Because of that re-sync-and-recompute step, it's always safe to rerun the
-exact same `--apply --expect <token>` command again — e.g. after a network
-error, when whether the write actually landed is unknown. A change that
-already matches its requested state is dropped from the plan before the
-token is recomputed (`warnings: ["already in that state: <ids>"]`); if
-every change in the plan already landed, the command exits 0 with
-`applied: true` and `warnings: ["already applied"]`, and nothing is sent
-again. `zm` itself never retries automatically.
+exact same `--apply --expect <token>` command again after a transport
+failure, an HTTP 5xx, or a malformed response from ZenMoney — exit **4
+(NETWORK)** with the hint "the change may have been written; run the same
+command again, it is safe to retry", since whether the write actually
+landed is unknown. An HTTP 4xx response is different: ZenMoney rejected
+the request outright before writing anything, so the hint instead says
+"ZenMoney rejected the write; nothing was changed. Rerun without --apply
+to review the plan" — retrying the identical `--apply` would just fail
+again. A change that already matches its requested state is dropped from
+the plan before the token is recomputed (`warnings: ["already in that
+state: <ids>"]`); if every change in the plan already landed, the command
+exits 0 with `applied: true` and `warnings: ["already applied"]`, and
+nothing is sent again. A dry-run whose plan is empty for the same reason
+(every target already matches the requested state) prints `applyCommand:
+null` instead of a command to rerun — there is nothing to apply. `zm`
+itself never retries automatically.
 
 ### What can be written
 
@@ -591,7 +600,12 @@ per account and currency, never summed across currencies. It's a safety
 net, not an authority: the ZenMoney server recomputes the real balance,
 and if its response to `--apply` doesn't include an updated version of an
 affected account, a `warnings` entry says to check that account in
-ZenMoney.
+ZenMoney. Similarly, if that response doesn't echo back one of the
+transactions just written, a `warnings` entry names it and points at `zm
+sync --full` to make sure the local cache matches ZenMoney — the write
+already happened either way (the POST is what succeeded or failed, not
+this check), and the payload sent is never written into the local cache
+directly, only whatever the response actually confirms.
 
 ## Output & exit codes
 

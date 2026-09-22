@@ -37,6 +37,7 @@ src/
   query/        classification (raw ZenMoney -> Tx) and filters
   analytics/    pure aggregation functions over Tx[]
   budget/       yaml budget files, status, suggest
+  write/        dry-run-first transaction writes (plan, present, apply)
   auth/         token resolution and storage
 tests/          mirrors src/, plus tests/e2e (built binary) and tests/fixtures (synthetic diff)
 ```
