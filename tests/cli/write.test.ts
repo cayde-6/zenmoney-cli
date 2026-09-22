@@ -7,6 +7,39 @@ import { apiFetch } from '../write/fakeApi.js'
 
 const zm = async (args: string[], over = {}) => { const t = seededContext(over); const code = await run(['node', 'zm', ...args], t.ctx); return { code, t } }
 
+// Splits a command string produced by src/write/present.ts's applyCommand
+// back into argv, understanding exactly its own quoting rules: a token is
+// either a bare word, or wrapped in single quotes with the POSIX '\'' idiom
+// (close quote, backslash-escaped literal quote, reopen quote) used to embed
+// a literal single quote. Not a general shell parser -- only shellQuote's
+// own output shape.
+function splitApplyCommand(cmd: string): string[] {
+  const tokens: string[] = []
+  let i = 0
+  const n = cmd.length
+  while (i < n) {
+    while (i < n && cmd[i] === ' ') i++
+    if (i >= n) break
+    let token = ''
+    while (i < n && cmd[i] !== ' ') {
+      const c = cmd[i]
+      if (c === "'") {
+        i++
+        while (i < n && cmd[i] !== "'") { token += cmd[i]; i++ }
+        i++ // skip closing quote
+      } else if (c === '\\') {
+        i++
+        if (i < n) { token += cmd[i]; i++ }
+      } else {
+        token += c
+        i++
+      }
+    }
+    tokens.push(token)
+  }
+  return tokens
+}
+
 // --- Validation before the cache is opened: every one of these must use a
 // context with NO cache at all, and still fail as INVALID_ARGS (not
 // NO_CACHE) -- proof the check runs before openCheckedStore.
@@ -269,8 +302,10 @@ it('edit: full dry-run -> apply round trip using the printed token', async () =>
   t.out.length = 0
 
   const calls: any[] = []
-  const t1 = t.ctx // reuse same ctx; need to swap fetch for apply call
-  ;(t.ctx as any).fetch = apiFetch([fixtureDiff(), { serverTimestamp: 1789000200, transaction: [{ ...Store.open(t.ctx.paths.cacheDb).getTransaction('t1')!, comment: 'New comment', changed: 1789000200 }] }], calls)
+  const preSyncStore = Store.open(t.ctx.paths.cacheDb)
+  const cachedT1 = preSyncStore.getTransaction('t1')!
+  preSyncStore.close()
+  ;(t.ctx as any).fetch = apiFetch([fixtureDiff(), { serverTimestamp: 1789000200, transaction: [{ ...cachedT1, comment: 'New comment', changed: 1789000200 }] }], calls)
 
   const applyCode = await run(['node', 'zm', 'edit', 't1', '--comment', 'New comment', '--apply', '--expect', token], t.ctx)
   expect(applyCode).toBe(0)
@@ -314,13 +349,92 @@ it('delete: full dry-run -> apply round trip using the printed token', async () 
   t.out.length = 0
 
   const calls: any[] = []
-  const originalT1 = Store.open(t.ctx.paths.cacheDb).getTransaction('t1')!
+  const preSyncStore = Store.open(t.ctx.paths.cacheDb)
+  const originalT1 = preSyncStore.getTransaction('t1')!
+  preSyncStore.close()
   ;(t.ctx as any).fetch = apiFetch([fixtureDiff(), { serverTimestamp: 1789000200, transaction: [{ ...originalT1, deleted: true, changed: 1789000200 }] }], calls)
 
   const applyCode = await run(['node', 'zm', 'delete', 't1', '--apply', '--expect', token], t.ctx)
   expect(applyCode).toBe(0)
   const out = t.json()
   expect(out.data.applied).toBe(true)
+  expect(calls[1].transaction[0]).toMatchObject({ id: 't1', deleted: true })
+})
+
+// --- Round trips driven by the printed applyCommand itself, not by
+// hand-assembled argv: proof that the exact text a caller would copy-paste
+// (with its shell quoting) really does reproduce the dry-run's plan. ---
+
+it('edit: round trip via argv parsed back out of applyCommand', async () => {
+  const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' } })
+  const dryCode = await run(['node', 'zm', 'edit', 't3', '--payee', 'New Payee'], t.ctx)
+  expect(dryCode).toBe(0)
+  const dry = t.json()
+  expect(dry.data.applyCommand).toBe(`zm edit t3 --payee 'New Payee' --apply --expect ${dry.data.token}`)
+  t.out.length = 0
+
+  const calls: any[] = []
+  const preSyncStore = Store.open(t.ctx.paths.cacheDb)
+  const cachedT3 = preSyncStore.getTransaction('t3')!
+  preSyncStore.close()
+  ;(t.ctx as any).fetch = apiFetch(
+    [fixtureDiff(), { serverTimestamp: 1789000200, transaction: [{ ...cachedT3, payee: 'New Payee', merchant: null, changed: 1789000200 }] }],
+    calls,
+  )
+
+  const argv = splitApplyCommand(dry.data.applyCommand).slice(1) // drop the leading 'zm'
+  const applyCode = await run(['node', 'zm', ...argv], t.ctx)
+  expect(applyCode).toBe(0)
+  expect(t.json().data.applied).toBe(true)
+  expect(calls[1].transaction[0]).toMatchObject({ id: 't3', payee: 'New Payee' })
+})
+
+it('add: round trip via argv parsed back out of applyCommand, keeping the dry-run\'s date across a local midnight', async () => {
+  let current = new Date('2026-09-15T23:50:00')
+  const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' }, now: () => current })
+  const dryCode = await run(['node', 'zm', 'add', '--expense', '9.99', '--account', 'Card PLN'], t.ctx)
+  expect(dryCode).toBe(0)
+  const dry = t.json()
+  expect(dry.data.applyCommand).toMatch(/--date 2026-09-15\b/)
+  const id = /--id (\S+)/.exec(dry.data.applyCommand)![1]!
+  t.out.length = 0
+
+  current = new Date('2026-09-16T00:10:00') // past local midnight, before --apply runs
+
+  const calls: any[] = []
+  const pushedTx = {
+    id, user: 10, date: '2026-09-15', income: 0, outcome: 9.99,
+    incomeAccount: 'acc-pln', outcomeAccount: 'acc-pln', incomeInstrument: 100, outcomeInstrument: 100,
+    tag: null, merchant: null, payee: null, comment: null, deleted: false, created: 1789000200, changed: 1789000200,
+  }
+  ;(t.ctx as any).fetch = apiFetch([fixtureDiff(), { serverTimestamp: 1789000200, transaction: [pushedTx] }], calls)
+
+  const argv = splitApplyCommand(dry.data.applyCommand).slice(1)
+  const applyCode = await run(['node', 'zm', ...argv], t.ctx)
+  expect(applyCode).toBe(0)
+  expect(t.json().data.applied).toBe(true)
+  // The POST carries the dry-run's date (2026-09-15), not the apply-time
+  // local date (2026-09-16) -- the argv parsed out of applyCommand pins it.
+  expect(calls[1].transaction[0]).toMatchObject({ id, date: '2026-09-15' })
+})
+
+it('delete: round trip via argv parsed back out of applyCommand', async () => {
+  const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' } })
+  const dryCode = await run(['node', 'zm', 'delete', 't1'], t.ctx)
+  expect(dryCode).toBe(0)
+  const dry = t.json()
+  t.out.length = 0
+
+  const calls: any[] = []
+  const preSyncStore = Store.open(t.ctx.paths.cacheDb)
+  const originalT1 = preSyncStore.getTransaction('t1')!
+  preSyncStore.close()
+  ;(t.ctx as any).fetch = apiFetch([fixtureDiff(), { serverTimestamp: 1789000200, transaction: [{ ...originalT1, deleted: true, changed: 1789000200 }] }], calls)
+
+  const argv = splitApplyCommand(dry.data.applyCommand).slice(1)
+  const applyCode = await run(['node', 'zm', ...argv], t.ctx)
+  expect(applyCode).toBe(0)
+  expect(t.json().data.applied).toBe(true)
   expect(calls[1].transaction[0]).toMatchObject({ id: 't1', deleted: true })
 })
 
@@ -332,10 +446,16 @@ it('edit an unknown id: INVALID_ARGS listing it, dry-run', async () => {
   expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'unknown transaction id: nope' })
 })
 
-it('edit an already-deleted id: INVALID_ARGS listing it, dry-run', async () => {
+it('edit a present-but-already-deleted id: INVALID_ARGS "already deleted", dry-run', async () => {
   const { code, t } = await zm(['edit', 't9', '--comment', 'X']) // t9 is deleted in the fixture
   expect(code).toBe(2)
-  expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'unknown transaction id: t9' })
+  expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'already deleted: t9' })
+})
+
+it('edit with both an unknown id and a deleted id reports the unknown one first', async () => {
+  const { code, t } = await zm(['edit', 'nope', 't9', '--comment', 'X'])
+  expect(code).toBe(2)
+  expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'unknown transaction id: nope' })
 })
 
 it('edit: target deleted between dry-run and --apply exits CONFLICT', async () => {
@@ -362,13 +482,21 @@ it('delete an unknown id: INVALID_ARGS listing it, dry-run', async () => {
   expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'unknown transaction id: nope' })
 })
 
-it('delete an already-deleted id: INVALID_ARGS "already deleted", dry-run', async () => {
-  const { code, t } = await zm(['delete', 't9'])
-  expect(code).toBe(2)
-  expect(t.errJson().error).toMatchObject({ code: 'INVALID_ARGS', message: 'already deleted: t9' })
+it('delete a present-but-already-deleted id alongside a live one: dropped with an "already in that state" warning, not an error', async () => {
+  const { code, t } = await zm(['delete', 't9', 't1']) // t9 already deleted in the fixture, t1 live
+  expect(code).toBe(0)
+  const { data, warnings } = t.json()
+  expect(data.changes.map((c: any) => c.id)).toEqual(['t1'])
+  expect(warnings).toContain('already in that state: t9')
 })
 
-it('delete: target already gone by --apply time (removed by sync) is treated as already applied', async () => {
+it('delete only already-deleted ids: "nothing to change" warning, no error', async () => {
+  const { code, t } = await zm(['delete', 't9'])
+  expect(code).toBe(0)
+  expect(t.json().warnings).toContain('nothing to change: already in that state')
+})
+
+it('delete: target already gone by --apply time (removed by sync via a deletion entry) is treated as already applied, with a well-formed envelope', async () => {
   const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' } })
   const dryCode = await run(['node', 'zm', 'delete', 't1'], t.ctx)
   expect(dryCode).toBe(0)
@@ -377,6 +505,34 @@ it('delete: target already gone by --apply time (removed by sync) is treated as 
 
   const calls: any[] = []
   const syncResponse = { serverTimestamp: 1789000200, deletion: [{ id: 't1', object: 'transaction', stamp: 1789000100, user: 10 }] }
+  ;(t.ctx as any).fetch = apiFetch([syncResponse], calls)
+
+  const applyCode = await run(['node', 'zm', 'delete', 't1', '--apply', '--expect', token], t.ctx)
+  expect(applyCode).toBe(0)
+  expect(calls).toHaveLength(1) // no push
+  const out = t.json()
+  expect(out.data.applied).toBe(true)
+  expect(out.warnings).toContain('already applied')
+  // The synthetic post-sync change (base: null, next: { id, deleted: true })
+  // must not leak a bogus balanceImpact entry or a `raw: null` key.
+  expect(out.data.balanceImpact).toEqual([])
+  for (const change of out.data.changes) {
+    expect('raw' in change).toBe(false)
+  }
+})
+
+it('delete: target already gone by --apply time (sync echoes the row with deleted: true, ZenMoney\'s real shape) is treated as already applied', async () => {
+  const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' } })
+  const dryCode = await run(['node', 'zm', 'delete', 't1'], t.ctx)
+  expect(dryCode).toBe(0)
+  const token = t.json().data.token
+  t.out.length = 0
+
+  const calls: any[] = []
+  const preSyncStore = Store.open(t.ctx.paths.cacheDb)
+  const originalT1 = preSyncStore.getTransaction('t1')!
+  preSyncStore.close()
+  const syncResponse = { serverTimestamp: 1789000200, transaction: [{ ...originalT1, deleted: true, changed: 1789000200 }] }
   ;(t.ctx as any).fetch = apiFetch([syncResponse], calls)
 
   const applyCode = await run(['node', 'zm', 'delete', 't1', '--apply', '--expect', token], t.ctx)

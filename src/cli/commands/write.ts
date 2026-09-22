@@ -15,10 +15,10 @@ import { resolveCategory, resolveAccount, isValidDate } from '../../query/filter
 import { ZmError } from '../../errors.js'
 import type { ZmTransaction } from '../../api/types.js'
 
-// Same wording as the --apply-without---expect hint runWrite itself throws
-// (src/write/apply.ts) -- reused here so a caller sees identical guidance
-// whether the check fires before the cache is even opened (this module) or
-// inside runWrite's own defensive re-check.
+// Same wording as runWrite's own CONFLICT hint (src/write/apply.ts) -- used
+// here so the add Planner's own "already exists with different content"
+// CONFLICT (thrown below, before runWrite ever gets a chance to) gives the
+// caller identical guidance to every CONFLICT runWrite itself throws.
 const RERUN_HINT = 'rerun without --apply to review the current state'
 
 function requireOwnerAll(cmd: Command, name: string): void {
@@ -104,16 +104,31 @@ export function registerWrite(program: Command, ctx: AppContext): void {
       if (format === 'table') argv.push('--format', 'table')
 
       const plan: Planner = (store, ds, { postSync }) => {
-        const badIds: string[] = []
+        const missing: string[] = []
+        const alreadyDeleted: string[] = []
         const targets: ZmTransaction[] = []
         for (const id of ids) {
           const t = store.getTransaction(id)
-          if (t === null || t.deleted) badIds.push(id)
+          if (t === null) missing.push(id)
+          else if (t.deleted) alreadyDeleted.push(id)
           else targets.push(t)
         }
-        if (badIds.length > 0) {
-          if (postSync) throw new ZmError('CONFLICT', 'transaction was deleted or is gone', badIds.join(', '))
-          throw new ZmError('INVALID_ARGS', `unknown transaction id: ${badIds.join(', ')}`, 'check the id, e.g. from zm tx')
+        if (postSync) {
+          if (missing.length > 0 || alreadyDeleted.length > 0) {
+            throw new ZmError('CONFLICT', 'transaction was deleted or is gone', [...missing, ...alreadyDeleted].join(', '))
+          }
+        } else {
+          // Two separate checks, unknown ids first: a never-synced id is a
+          // plain mistake (INVALID_ARGS "unknown"), while a present-but-
+          // deleted one gets its own, more specific message -- they are
+          // never merged into one, so fixing the first kind doesn't hide
+          // the second kind still waiting on a rerun.
+          if (missing.length > 0) {
+            throw new ZmError('INVALID_ARGS', `unknown transaction id: ${missing.join(', ')}`, 'check the id, e.g. from zm tx')
+          }
+          if (alreadyDeleted.length > 0) {
+            throw new ZmError('INVALID_ARGS', `already deleted: ${alreadyDeleted.join(', ')}`, 'nothing to edit')
+          }
         }
 
         const fields: EditFields = {}
@@ -217,22 +232,29 @@ export function registerWrite(program: Command, ctx: AppContext): void {
           if (missing.length > 0) {
             throw new ZmError('INVALID_ARGS', `unknown transaction id: ${missing.join(', ')}`, 'check the id, e.g. from zm tx')
           }
-          const alreadyDeleted = ids.filter(id => store.getTransaction(id)!.deleted)
-          if (alreadyDeleted.length > 0) {
-            throw new ZmError('INVALID_ARGS', `already deleted: ${alreadyDeleted.join(', ')}`, 'nothing to delete')
-          }
+          // A present-but-already-deleted target is not rejected here --
+          // it is planned like any other target. runWrite's own
+          // isApplied-based filtering (splitPending) drops it before the
+          // token is computed and reports it via the "already in that
+          // state"/"nothing to change" warnings, exactly the way an edit
+          // target that already matches the requested state is handled.
           return planDelete(ids.map(id => store.getTransaction(id)!))
         }
-        // Post-sync: a target the sync just found gone (deleted or removed
-        // outright) is not an error here -- it is exactly the retry case a
-        // synthetic already-applied change exists for (see isApplied, which
-        // treats `current === null` as applied for a delete). A target the
-        // sync still finds `deleted: true` on goes through planDelete
-        // normally; isApplied drops it the same way once splitPending looks
-        // it up again.
+        // Post-sync: a target the sync found gone outright (no row left in
+        // the cache at all) gets a synthetic already-applied marker. `next`
+        // must itself carry `deleted: true` -- balanceImpact's
+        // contribution() checks `t.deleted` before reading any other field,
+        // so a bare `{ id }` (missing `deleted`) fell through into reading
+        // undefined income/outcome/account fields and produced a bogus
+        // balanceImpact entry; changeViews never emits a `raw: null` key for
+        // this case either, since it only adds `raw` when `base` is
+        // non-null, and this synthetic change's `base` is null. A target the
+        // sync still finds present (deleted or not) goes through planDelete
+        // normally; isApplied drops an already-deleted one the same way
+        // once splitPending looks it up again.
         return ids.map((id): PlannedChange => {
           const t = store.getTransaction(id)
-          if (t === null) return { op: 'delete', id, base: null, next: { id } as ZmTransaction, set: {} }
+          if (t === null) return { op: 'delete', id, base: null, next: { id, deleted: true } as ZmTransaction, set: {} }
           return planDelete([t])[0]!
         })
       }

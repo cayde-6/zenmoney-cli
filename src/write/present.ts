@@ -67,7 +67,12 @@ export function changeViews(ds: Dataset, changes: PlannedChange[]): ChangeView[]
     before: c.base ? toTx(c.base, ds) : null,
     after: c.op === 'delete' ? null : toTx(c.next, ds),
     fields: Object.keys(c.set).sort(),
-    ...(c.op === 'delete' ? { raw: c.base as ZmTransaction } : {}),
+    // `raw` is included only when there is a real cached row to show: a
+    // synthetic post-sync "target already gone" delete change (see
+    // src/cli/commands/write.ts's delete Planner) has `base: null`, and
+    // `raw: null` would otherwise show up as a spurious key in the printed
+    // envelope for a change nothing was actually sent for.
+    ...(c.op === 'delete' && c.base ? { raw: c.base as ZmTransaction } : {}),
   }))
 }
 

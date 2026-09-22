@@ -161,6 +161,14 @@ it('changeViews: fields is empty for delete', () => {
   expect(changeViews(ds, planDelete([t1]))[0]!.fields).toEqual([])
 })
 
+it('changeViews: a synthetic delete change with base null (target already gone post-sync) has no raw key', () => {
+  const synthetic: PlannedChange = { op: 'delete', id: 'gone', base: null, next: { id: 'gone', deleted: true } as ZmTransaction, set: {} }
+  const [view] = changeViews(ds, [synthetic])
+  expect(view!.before).toBeNull()
+  expect(view!.after).toBeNull()
+  expect('raw' in view!).toBe(false)
+})
+
 // tableRows
 
 it('tableRows: one row per changed field, scalar before/after', () => {
