@@ -239,9 +239,9 @@ zm recurring [--months <n>] [--min-months <n>]
 zm budget init [--force]
 zm budget status [--month <YYYY-MM>]
 zm budget suggest [--months <n>] [--month <YYYY-MM>]
-zm edit <id...> [--comment <text>] [--payee <text>] [--category <query>] [--date <date>] [--amount <n>] [--account <query>] [--apply --expect <token>]
+zm edit <ids...> [--comment <text>] [--payee <text>] [--category <query>] [--date <date>] [--amount <n>] [--account <query>] [--apply --expect <token>]
 zm add (--expense <n>|--income <n>) --account <query> [--category <query>] [--date <date>] [--comment <text>] [--payee <text>] [--id <uuid>] [--apply --expect <token>]
-zm delete <id...> [--apply --expect <token>]
+zm delete <ids...> [--apply --expect <token>]
 ```
 
 Run `zm <command> --help` for the exact flags and worked examples of any
@@ -251,9 +251,10 @@ always in sync with the installed version.
 ## Global options & filters
 
 All commands accept global `--format json|table` (default `json`) and
-`--owner <value>` (default `all`) — though `categories`, `rates`, and
-`owners` reject any `--owner` value other than `all` (see below) rather
-than accepting and ignoring it. `--owner` has two different sets of valid
+`--owner <value>` (default `all`) — though `categories`, `rates`,
+`owners`, `zm edit`, `zm add`, and `zm delete` reject any `--owner` value
+other than `all` (see below) rather than accepting and ignoring it.
+`--owner` has two different sets of valid
 values, depending on whether `<configDir>/owners.yaml` exists — see
 "Owners" below for the full explanation:
 
@@ -282,10 +283,13 @@ commands":
   than `all` with exit code 2 (none of the three has a per-owner concept —
   `owners` *lists* owners, it isn't filtered by one), rather than silently
   ignoring it — `--owner all` (the default) is accepted since it's a
-  no-op. Elsewhere, `--owner` only has an effect on `users`, `accounts`,
-  `tx`, `spend`, `income`, `compare`, `recurring`, `budget status`, and
-  `budget suggest` — `auth`, `sync`, `status`, and `budget init` accept the
-  flag but it has no effect on any of them.
+  no-op. `zm edit`, `zm add`, and `zm delete` reject any `--owner` value
+  other than `all` the same way (exit 2) — they target explicit
+  transaction ids, not an owner-filtered set, so there's nothing for
+  `--owner` to do. Elsewhere, `--owner` only has an effect on `users`,
+  `accounts`, `tx`, `spend`, `income`, `compare`, `recurring`, `budget
+  status`, and `budget suggest` — `auth`, `sync`, `status`, and `budget
+  init` accept the flag but it has no effect on any of them.
 - `users` is always filtered by ZenMoney-user semantics
   (`me|all|<id>|<login>`), never by `owners.yaml` names — but once
   `owners.yaml` exists, it *also* rejects any non-`all` value outright
@@ -541,7 +545,13 @@ synced cache, and only sends the write if the recomputed token still
 matches `--expect`. A mismatch exits **7 (CONFLICT)**, with a hint to
 rerun the dry-run and review the current state — this is what catches a
 change made in the ZenMoney app, by another `zm` run, or by an
-intervening `zm sync` since the dry-run.
+intervening `zm sync` since the dry-run. `zm edit --apply` also exits 7 if
+the sync it just ran finds a target deleted or gone entirely.
+
+Exit 7 isn't limited to `--apply`: `zm add --id <uuid>` also exits 7 on a
+plain dry-run if that id already exists with different content (the same
+check runs again during `--apply`, in case it exists by then even though
+it didn't at dry-run time).
 
 Because of that re-sync-and-recompute step, it's always safe to rerun the
 exact same `--apply --expect <token>` command again — e.g. after a network
@@ -554,9 +564,10 @@ again. `zm` itself never retries automatically.
 
 ### What can be written
 
-- `zm edit <id...>`: `--comment`, `--payee` (also clears any linked
-  merchant), `--category`, and `--date` work on any transaction;
-  `--comment ""` and `--payee ""` clear the field. `--amount` and
+- `zm edit <ids...>`: `--comment`, `--payee`, `--category`, and `--date`
+  work on any transaction; `--comment ""` and `--payee ""` clear the
+  field. A non-empty `--payee` also clears any linked merchant (`--payee
+  ""` clears only the payee — merchant is left alone). `--amount` and
   `--account` only work on a single-currency simple transaction
   (classified `expense`, `income`, or `refund`, same currency on both
   sides) — using either on a transfer, a debt, or a foreign-currency
@@ -569,7 +580,7 @@ again. `zm` itself never retries automatically.
   a UUID and includes it in the printed `applyCommand`, so retrying the
   same command always targets the same transaction; `--apply` requires
   `--id`.
-- `zm delete <id...>`: marks the transaction deleted in ZenMoney, the same
+- `zm delete <ids...>`: marks the transaction deleted in ZenMoney, the same
   as deleting it from the app. The dry-run's `changes[].raw` carries the
   full cached copy of each transaction that would be deleted — there is no
   separate local undo.
@@ -600,7 +611,7 @@ is 3 days old, run zm sync"` is added — the data is still returned.
 | 4 | network or ZenMoney API error |
 | 5 | no local cache (run `zm sync`), or the cache file is unreadable/corrupted (delete it and run `zm sync --full`) |
 | 6 | cache is busy (another `zm sync` is running) — retry in a few seconds |
-| 7 | `zm edit`/`zm add`/`zm delete --apply`: the data changed since the dry-run (or the plan is otherwise no longer valid) — rerun the dry-run and review the current state |
+| 7 | `zm add` (dry-run or `--apply`): the given `--id` already exists with different content. `zm edit`/`zm add`/`zm delete --apply`: the recomputed plan no longer matches `--expect` (or, for `edit`, a target was deleted or removed by the sync `--apply` just ran) — rerun the dry-run and review the current state |
 
 Errors are printed to stderr as `{"error": {"code", "message", "hint"}}`
 (plain text with `--format table`).
@@ -627,12 +638,14 @@ Errors are printed to stderr as `{"error": {"code", "message", "hint"}}`
   with `PRAGMA journal_mode=WAL`/`busy_timeout=5000` so concurrent `zm`
   invocations don't corrupt it (a still-locked cache surfaces as exit code
   6 rather than hanging). A stored token is only looked up by `zm sync`
-  (to call the API) and `zm status` (to report where a token would come
-  from — `zm status` never reads or prints the token's actual value, only
-  its `source`); `zm auth` validates whatever token you just gave it,
-  before saving it, rather than looking up a previously stored one. Every
-  other read command works purely off the local cache and never touches
-  the token at all. The lookup order, when it happens, is: `ZENMONEY_TOKEN`
+  and `zm edit`/`zm add`/`zm delete --apply` (both call the API), and by
+  `zm status` (to report where a token would come from — `zm status`
+  never reads or prints the token's actual value, only its `source`);
+  `zm auth` validates whatever token you just gave it, before saving it,
+  rather than looking up a previously stored one. Every other read
+  command, and every write command's dry-run, works purely off the local
+  cache and never touches the token at all. The lookup order, when it
+  happens, is: `ZENMONEY_TOKEN`
   env var, then macOS Keychain, then `config.json`. Set
   `ZM_DISABLE_KEYCHAIN=1` to skip the Keychain entirely (e.g. in sandboxes
   without `security` access) and fall back to `config.json`. If a Keychain
@@ -640,9 +653,10 @@ Errors are printed to stderr as `{"error": {"code", "message", "hint"}}`
   `config.json` (`{ "saved": "config" }`) and adds a `warnings` entry:
   `"could not store the token in macOS Keychain, saved to <configFile>
   instead"`.
-- Network requests to `api.zenmoney.ru` (`zm auth`, `zm sync`) time out
-  after `ZM_TIMEOUT_MS` milliseconds (default `60000`); it must be a
-  positive integer, or the command fails fast with `INVALID_ARGS`.
+- Network requests to `api.zenmoney.ru` (`zm auth`, `zm sync`, and `zm
+  edit`/`zm add`/`zm delete --apply`) time out after `ZM_TIMEOUT_MS`
+  milliseconds (default `60000`); it must be a positive integer, or the
+  command fails fast with `INVALID_ARGS`.
 
 ## Using with AI agents
 

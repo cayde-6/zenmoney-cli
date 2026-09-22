@@ -91,11 +91,16 @@ analytics/budget-over-query-over-store split:
   `{ op, id, base, next, set }`, where `set` is the exact raw ZenMoney
   field assignments that would be sent (the whole object minus
   `changed`/`created` for `create`; `{}` for `delete`, whose payload is
-  `base` with `deleted: true`). `isRestricted` flags a transfer, a debt, or
-  anything with an `op*` field set (a foreign-currency purchase) — the only
-  kinds `--amount`/`--account` can't touch, and the only kinds `zm add`
-  can't create. `isApplied` decides whether a target already matches a
-  change's `set` (used for retry detection, below).
+  `base` with `deleted: true`). `isRestricted` flags a transfer, a debt,
+  differing `incomeInstrument`/`outcomeInstrument`, or anything with an
+  `op*` field set (the last two both mean a foreign-currency transaction)
+  — the only kinds `--amount`/`--account` can't touch, and the only kinds
+  `zm add` can't create. `isApplied` decides whether a target already
+  matches a change's `set` (used for retry detection, below). `zm add`'s
+  own Planner (`cli/commands/write.ts`, not `plan.ts`) additionally throws
+  `CONFLICT` itself — on a dry-run as much as on `--apply` — if the
+  requested `--id` already names an existing transaction that `isApplied`
+  says doesn't match what's being sent (see "The write itself" below).
 - **Presentation** (`write/present.ts`, pure, no I/O): turns a
   `PlannedChange[]` into what a dry-run or an apply result prints —
   `changeViews` (before/after `Tx`, `fields`, and, for `delete`, the full
@@ -120,6 +125,12 @@ over what it would send and prints it inside the `applyCommand` it shows
 mismatch as `CONFLICT` (exit 7) — this is what turns "the plan you're
 about to send" into something checkable against "the plan the caller
 actually looked at," without keeping any server-side state.
+
+`CONFLICT` isn't only an `--apply` outcome, though: `zm add`'s own
+Planner (see above) throws it on a plain dry-run too, whenever the
+requested `--id` already names a transaction with different content —
+there's no plan token to compare yet at that point, since the caller
+hasn't seen one.
 
 ### Retry detection ("already-in-state" filtering)
 
@@ -156,10 +167,25 @@ again.
 2. An incremental sync (the same `fetchDiff`/`applyDiff` path as `zm
    sync`), applied to the cache, so the plan is rebuilt from the freshest
    known server state before anything is sent.
-3. Re-plan from the post-sync cache, run `splitPending`. A `create` whose
-   id already exists with different content (already ruled out as
-   "already applied" by `isApplied`, so this can only be a genuine
-   conflict) throws `CONFLICT` before the token check even runs.
+3. Re-plan from the post-sync cache (calling the same Planner the
+   dry-run used, now with `postSync: true`), run `splitPending`. Two
+   command-specific checks can throw `CONFLICT` right here, inside the
+   Planner itself, before `runWrite` even reaches the token check: `zm
+   add`'s Planner re-runs its own id-exists check (see "Planning" above)
+   against the freshly synced cache; `zm edit`'s Planner throws
+   `"transaction was deleted or is gone"` if the sync just found one of
+   the targets deleted or removed outright. On a plain dry-run
+   (`postSync: false`), the same missing/already-deleted condition is
+   `INVALID_ARGS` (exit 2) instead — a target that was never there, or was
+   already deleted, before the caller even asked for anything is a plain
+   mistake to report as such; the same condition discovered by the sync
+   `--apply` just ran is instead a conflict, since there's nothing left to
+   write for a plan the caller already committed to. `write/apply.ts`
+   itself then repeats the create-id-exists check once more, over
+   whatever's left in `pending`, as a defensive backstop — reachable only
+   if something slips past the Planner's own check, since a `create` id
+   that already exists with different content is normally already caught
+   the moment `zm add` re-plans in this same step.
 4. Compare `planToken(pending)` against `--expect`; a mismatch throws
    `CONFLICT` (`"the data changed since the dry-run"`, hint `"rerun
    without --apply to review the current state"`).
@@ -593,7 +619,7 @@ shape. `cli/output.ts: printError` prints `{"error": {"code", "message",
 | `NETWORK` | 4 | network failure or non-2xx ZenMoney response |
 | `NO_CACHE` | 5 | no local cache yet (`zm sync` hasn't run), or the cache file/a row is corrupted |
 | `CACHE_BUSY` | 6 | cache is locked by another connection (e.g. a concurrent `zm sync`) |
-| `CONFLICT` | 7 | `zm edit`/`zm add`/`zm delete --apply`: the recomputed plan token doesn't match `--expect` (or an `add`'s id already exists with different content) — see "Write flow" above |
+| `CONFLICT` | 7 | `zm add` (dry-run or `--apply`): `--id` already exists with different content. `zm edit`/`zm add`/`zm delete --apply`: the recomputed plan token doesn't match `--expect`, or (edit only) a target was deleted or removed by the sync `--apply` just ran — see "Write flow" above |
 
 Option-shape validation (e.g. an unknown `--by`, an invalid `--month`) runs
 *before* the cache is opened, so a bad invocation fails the same way whether

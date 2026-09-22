@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Transaction writes**: `zm edit <id...>`, `zm add`, and `zm delete
-  <id...>` — the only commands that write to ZenMoney, and only
+- **Transaction writes**: `zm edit <ids...>`, `zm add`, and `zm delete
+  <ids...>` — the only commands that write to ZenMoney, and only
   transactions. Every one is a dry-run by default: it prints `{ applied,
   token, applyCommand, changes, balanceImpact }`, and writing requires
   rerunning the exact printed `applyCommand` (`--apply --expect <token>`).
