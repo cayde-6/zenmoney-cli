@@ -154,15 +154,14 @@ export function toTx(t: ZmTransaction, l: TxLookups): Tx | null {
     }
   } else {
     // debt: primary side is the non-debt account
-    const outcomeIsDebt = accounts.get(t.outcomeAccount)?.type === 'debt'
-    if (outcomeIsDebt) {
+    const outcomeAcc = accounts.get(t.outcomeAccount)
+    if (outcomeAcc?.type === 'debt') {
       accountId = t.incomeAccount
       amount = t.income
       instrumentId = t.incomeInstrument
-      const cpAccount = accounts.get(t.outcomeAccount)
       counterpart = {
         accountId: t.outcomeAccount,
-        accountTitle: cpAccount?.title ?? t.outcomeAccount,
+        accountTitle: outcomeAcc.title,
         amount: t.outcome,
         currency: instruments.get(t.outcomeInstrument)?.shortTitle ?? '',
       }
@@ -170,10 +169,12 @@ export function toTx(t: ZmTransaction, l: TxLookups): Tx | null {
       accountId = t.outcomeAccount
       amount = t.outcome
       instrumentId = t.outcomeInstrument
-      const cpAccount = accounts.get(t.incomeAccount)
+      // classify() returned 'debt' and the outcome account isn't debt, so
+      // the income account must exist and be the debt side.
+      const cpAccount = accounts.get(t.incomeAccount)!
       counterpart = {
         accountId: t.incomeAccount,
-        accountTitle: cpAccount?.title ?? t.incomeAccount,
+        accountTitle: cpAccount.title,
         amount: t.income,
         currency: instruments.get(t.incomeInstrument)?.shortTitle ?? '',
       }

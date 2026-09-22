@@ -292,3 +292,12 @@ it('isApplied for create compares only the core money/where/what fields, tolerat
   // a core field actually differs: not applied
   expect(isApplied(c!, { ...c!.next, outcome: 1 })).toBe(false)
 })
+
+it('token is pinned to an exact value for a fixed plan (proves cleanup did not change tokens)', () => {
+  const fixed: PlannedChange[] = [
+    { op: 'update', id: 'pin-a', base: { ...t1, id: 'pin-a', changed: 42 }, next: t1, set: { comment: 'pinned', tag: ['food'] } },
+    { op: 'create', id: 'pin-b', base: null, next: t1, set: { id: 'pin-b', date: '2026-01-02', income: 0, outcome: 100 } },
+  ]
+  // computed on the pre-cleanup implementation; must stay identical after it
+  expect(planToken(fixed)).toBe('54f0871007a70f26')
+})
