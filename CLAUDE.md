@@ -37,6 +37,7 @@ src/
   query/        classification (raw ZenMoney -> Tx) and filters
   analytics/    pure aggregation functions over Tx[]
   budget/       yaml budget files, status, suggest
+  write/        dry-run-first transaction writes (plan, present, apply)
   auth/         token resolution and storage
 tests/          mirrors src/, plus tests/e2e (built binary) and tests/fixtures (synthetic diff)
 ```
@@ -79,7 +80,8 @@ before editing either.
 
 ## Never
 
-- Run `zm auth` or `zm sync` against the real ZenMoney API from an agent
-  session — both make live network calls.
+- Run `zm auth`, `zm sync`, or any `zm edit/add/delete --apply` against the
+  real ZenMoney API from an agent session — all three make live network
+  calls.
 - Commit real financial data, real names, emails, or other personal
   identifiers — this repository is public.

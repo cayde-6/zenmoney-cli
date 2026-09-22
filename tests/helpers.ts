@@ -10,6 +10,7 @@ import { fixtureDiff } from './fixtures/diff.js'
 export function testContext(over: Partial<AppContext> = {}) {
   const out: string[] = [], err: string[] = []
   const paths = over.paths ?? resolvePaths({}, 'linux', mkdtempSync(join(tmpdir(), 'zm-home-')))
+  let uuidN = 0
   const ctx: AppContext = {
     env: {}, platform: 'linux', now: () => new Date('2026-09-15T12:00:00'),
     paths,
@@ -21,6 +22,7 @@ export function testContext(over: Partial<AppContext> = {}) {
       if (!existsSync(paths.cacheDb)) throw new ZmError('NO_CACHE', 'no local cache', 'run zm sync')
       return Store.open(paths.cacheDb)
     },
+    uuid: () => `00000000-0000-4000-8000-${String(++uuidN).padStart(12, '0')}`,
     ...over,
   }
   return { ctx, out, err, json: () => JSON.parse(out.join('')), errJson: () => JSON.parse(err.join('')) }

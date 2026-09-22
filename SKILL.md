@@ -1,12 +1,17 @@
 ---
 name: zenmoney-cli
-description: "Read a user's ZenMoney spending via the zm CLI: transactions, per-currency aggregates, recurring payments, and a local monthly budget. Use when asked to analyse spending, find subscriptions, or plan a budget."
+description: "Read a user's ZenMoney spending via the zm CLI: transactions, per-currency aggregates, recurring payments, and a local monthly budget. Can also edit, add, and delete transactions (dry-run first). Use when asked to analyse spending, find subscriptions, plan a budget, or fix a transaction."
 ---
 
 # zenmoney-cli
 
-`zm` is a read-only CLI over a user's ZenMoney data. It never writes to
-ZenMoney — only to a local SQLite cache and local budget yaml files.
+`zm` reads a user's ZenMoney data for analysis, and can also write it back
+through three commands: `zm edit`, `zm add`, `zm delete`. Every one of
+those is a dry-run by default and writes only with `--apply --expect
+<token>` from a dry-run already shown to the user — see "Rules for
+agents" and the command reference below. Every other command is
+read-only; anything else this CLI writes is local (its own SQLite cache
+and, if asked, budget yaml files).
 
 ## Setup
 
@@ -32,8 +37,9 @@ those is available.
   `zm budget suggest`**, which prints a raw yaml draft to stdout (no
   envelope) and puts warnings on stderr as plain `warning: ...` lines instead.
 - `meta.lastSyncAt` is present on every command that opens the local cache
-  (all read commands, plus `zm sync` itself); `zm auth` and `zm status` have
-  no `meta.lastSyncAt` (`zm status` reports the same information as
+  (all read commands, `zm sync` itself, and `zm edit`/`zm add`/`zm delete`,
+  both dry-run and `--apply`); `zm auth` and `zm status` have no
+  `meta.lastSyncAt` (`zm status` reports the same information as
   `data.cache.lastSyncAt` instead, since it works even without a cache).
   When the cache is stale, cache-reading commands also add a top-level
   `warnings` array with an entry like `"cache is 1 day old, run zm sync"` (or
@@ -90,8 +96,19 @@ those is available.
   subtract from the total. To reproduce a `spend` figure from raw `tx` rows
   yourself, filter to `type in (expense, refund)` and net them with that
   sign — never just sum `amount` across both types.
-- ZenMoney itself is never modified by this CLI — no operations, no
-  categories, no ZenMoney-side budgets are ever written.
+- ZenMoney itself is only ever modified through `zm edit`/`zm add`/`zm
+  delete`, and only transactions are ever written — no categories, no
+  accounts, no ZenMoney-side budgets. **Run `--apply` only when the user
+  explicitly asked for that specific change and has been shown the
+  dry-run output.** Always run the printed `applyCommand` verbatim — never
+  hand-construct `--apply --expect <token>` yourself, and never drop or
+  change `--id` (or otherwise alter the command) without the user's
+  consent, even if doing so looks like it would fix an error. If `--apply`
+  exits 7 (CONFLICT), rerun the dry-run and show it to the user again
+  before applying. Exit 7 isn't only an `--apply` outcome, either: a plain
+  `zm add --id <uuid>` dry-run can itself exit 7, if that id already
+  exists with different content — if a dry-run exits 7, stop and report it
+  to the user instead of retrying or improvising a fix.
 - Budget files live in `~/.config/zm/budget/` (`default.yaml` plus optional
   `YYYY-MM.yaml` overrides). Only write or edit them when the user explicitly
   asks for a budget to be created or changed.
@@ -100,13 +117,16 @@ those is available.
 
 All commands accept `--format json|table` (default `json`). `--owner
 <value>` is also a global flag — see "run `zm owners` first" above for its
-two modes — but `categories`, `rates`, and `owners` reject any value other
-than `all` (exit 2, `INVALID_ARGS`) since none of the three has a
-per-owner concept — `--owner all`, the default, is accepted as a no-op;
-every other command accepts it, though it only has an effect on `users`,
-`accounts`, `tx`, `spend`, `income`, `compare`, `recurring`, `budget
-status`, and `budget suggest` (`auth`, `sync`, `status`, and `budget init`
-accept it but it has no effect on any of them). `users` always keeps
+two modes — but `categories`, `rates`, `owners`, `zm edit`, `zm add`, and
+`zm delete` reject any value other than `all` (exit 2, `INVALID_ARGS`):
+`categories`/`rates`/`owners` since none of the three has a per-owner
+concept, and `edit`/`add`/`delete` since they target explicit transaction
+ids, not an owner-filtered set. `--owner all`, the default, is accepted as
+a no-op everywhere. Every other command accepts `--owner`, though it only
+has an effect on `users`, `accounts`, `tx`, `spend`, `income`, `compare`,
+`recurring`, `budget status`, and `budget suggest` (`auth`, `sync`,
+`status`, and `budget init` accept it but it has no effect on any of
+them). `users` always keeps
 ZenMoney-user semantics for `--owner`, but once `owners.yaml` exists it
 *also* rejects any non-`all` value outright (exit 2, hint pointing to `zm
 owners`) rather than silently keep applying `me`/login/id semantics.
@@ -145,6 +165,9 @@ Run `zm <command> --help` for the exact flags and examples of any command.
 | `zm budget init` | `--force` | `{ file }` — writes a commented `default.yaml` template |
 | `zm budget status` | `--month` | `{ month, monthElapsedPct, rows: [{ category, categoryId, currency, planned, spent, spentOtherCurrencies, remaining, usedPct, monthElapsedPct, pace }], unplanned, unresolved: [{ key, amount, currency }] }` — a limit key that no longer resolves to any category is skipped (with a warning) rather than failing the command, and listed in `unresolved` |
 | `zm budget suggest` | `--months` (default 3), `--month` (default next month) | prints a draft yaml to stdout (not JSON, not written to a file) |
+| `zm edit <ids...>` | `--comment`, `--payee`, `--category`, `--date`, `--amount`, `--account`, `--apply`, `--expect` | `{ applied, token, applyCommand, changes: [{ op, id, before, after, fields, raw? }], balanceImpact: [{ accountId, accountTitle, currency, delta }] }` — dry-run by default (`applied: false`, `applyCommand` the exact command that writes it, or `null` if every target already matches the requested state — nothing to apply); after a successful `--apply`, `applied: true` and `applyCommand: null`; `--amount`/`--account` only work on a single-currency simple transaction (exit 2 on a transfer/debt/foreign-currency one, no partial edit); a non-empty `--payee` also clears any linked merchant (`--payee ""` clears only the payee); `--owner` other than `all` is rejected; `--apply` can exit 7 (CONFLICT) if the sync it just ran finds a target deleted or gone |
+| `zm add` | `--expense`\|`--income`, `--account`, `--category`, `--date`, `--comment`, `--payee`, `--id`, `--apply`, `--expect` | same `data` shape as `zm edit` (`applyCommand: null` after a successful `--apply`); a dry-run without `--id` generates a UUID and includes it in `applyCommand`, so retrying always targets the same transaction; `--apply` requires `--id`; `--owner` other than `all` is rejected; exits 7 (CONFLICT) — on a dry-run too, not just `--apply` — if `--id` already exists with different content |
+| `zm delete <ids...>` | `--apply`, `--expect` | same `data` shape (`applyCommand: null` after a successful `--apply`); `changes[].raw` carries the full cached transaction being deleted (no local undo); `--owner` other than `all` is rejected |
 
 ## Recipes
 
@@ -199,6 +222,7 @@ than silently overriding the existing row. Finish with `zm budget status
 | 4 | network or ZenMoney API error |
 | 5 | no local cache (run `zm sync`), or the cache is corrupted (delete it and run `zm sync --full`) |
 | 6 | cache is busy (another `zm sync` is running) — retry in a few seconds |
+| 7 | `zm add` (dry-run or `--apply`): `--id` already exists with different content. `zm edit`/`zm add`/`zm delete --apply`: the recomputed plan no longer matches `--expect`, or (edit only) a target is now deleted or gone — rerun the dry-run and show it to the user again |
 
 On failure, stderr carries `{"error": {"code", "message", "hint"}}` (plain
 text with `--format table`).

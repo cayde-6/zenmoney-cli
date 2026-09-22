@@ -1,9 +1,11 @@
 # Architecture
 
-`zm` is a read-only CLI over a ZenMoney account: it downloads a diff of the
-account into a local SQLite cache, classifies each raw transaction into a
-typed model, and runs pure, per-currency analytics and a local budget check
-against that model. This document describes the module map, data flow,
+`zm` is a CLI over a ZenMoney account: it downloads a diff of the account
+into a local SQLite cache, classifies each raw transaction into a typed
+model, and runs pure, per-currency analytics and a local budget check
+against that model for reading — plus dry-run-first transaction writes
+(`zm edit`/`zm add`/`zm delete`, see "Write flow" below) on top of that
+same cache and model. This document describes the module map, data flow,
 classification rules, and the design decisions behind them, as the current
 code (`src/`) implements them.
 
@@ -24,6 +26,9 @@ src/
   budget/       files.ts does the module's only fs I/O (reads/validates yaml budget files); status.ts (plan vs
                 actual, reusing analytics/spend.ts's spendBy for its `unplanned` block) and suggest.ts (draft
                 from history) are pure functions over already-loaded data, like analytics/
+  write/        zm edit/add/delete: plan.ts (pure) builds PlannedChange rows and the plan token; present.ts
+                (pure) turns them into before/after views, balanceImpact, table rows, and the applyCommand
+                string; apply.ts is the one file with I/O — it syncs, re-plans, checks the token, and POSTs
   auth/         token resolution and storage (env, macOS Keychain, config.json)
   errors.ts     ZmError and the error-code -> exit-code table
   paths.ts      XDG-aware config/cache paths
@@ -33,11 +38,15 @@ src/
 Dependencies are one-directional: `cli → budget → analytics → query → store`
 (`budget/status.ts` reuses `analytics/spend.ts`'s `spendBy` for its
 `unplanned` block; `cli` also depends on `analytics` and `query` directly for
-commands that don't go through `budget`). `api` is only reached from
-`cli/commands/sync.ts` (`zm auth`, `zm sync`). `query` and `analytics` are
+commands that don't go through `budget`). `api` is reached from
+`cli/commands/sync.ts` (`zm auth`, `zm sync`) and from `write/apply.ts`
+(`zm edit`/`add`/`delete --apply`). `query` and `analytics` are
 pure/synchronous and tested against an in-memory SQLite store, with no
 network involved; `budget` is pure/synchronous too except `files.ts`, which
-does real fs I/O (reading/writing yaml budget files).
+does real fs I/O (reading/writing yaml budget files). `write` sits
+alongside `budget`: `plan.ts`/`present.ts` are pure like `analytics`/
+`budget`, but `apply.ts` talks to both `api` and `store` directly — see
+"Write flow" below.
 
 ## Data flow
 
@@ -68,6 +77,189 @@ does real fs I/O (reading/writing yaml budget files).
 6. **Output** (`cli/output.ts`): every read command's result is wrapped in
    `{ data, meta, warnings? }` and printed as JSON, or flattened into a
    table for `--format table`.
+
+## Write flow
+
+`zm edit`/`zm add`/`zm delete` (`cli/commands/write.ts`, `write/plan.ts`,
+`write/present.ts`, `write/apply.ts`) are the one part of this CLI that
+writes to ZenMoney. The feature is split into three layers with a strict
+one-way dependency, the same discipline as the read path's
+analytics/budget-over-query-over-store split:
+
+- **Planning** (`write/plan.ts`, pure, no I/O): `planEdit`/`planAdd`/
+  `planDelete` turn already-resolved targets (looked up by
+  `cli/commands/write.ts`, which owns flag validation, id lookup, and
+  category/account resolution) and field input into `PlannedChange[]` —
+  `{ op, id, base, next, set }`, where `set` is the exact raw ZenMoney
+  field assignments that would be sent (the whole object minus
+  `changed`/`created` for `create`; `{}` for `delete`, whose payload is
+  `base` with `deleted: true`). `isRestricted` flags a transfer, a debt,
+  differing `incomeInstrument`/`outcomeInstrument`, or anything with an
+  `op*` field set (the last two both mean a foreign-currency transaction)
+  — the only kinds `--amount`/`--account` can't touch, and the only kinds
+  `zm add` can't create. `isApplied` decides whether a target already
+  matches a change's `set` (used for retry detection, below). `zm add`'s
+  own Planner (`cli/commands/write.ts`, not `plan.ts`) additionally throws
+  `CONFLICT` itself — on a dry-run as much as on `--apply` — if the
+  requested `--id` already names an existing transaction that `isApplied`
+  says doesn't match what's being sent (see "The write itself" below).
+- **Presentation** (`write/present.ts`, pure, no I/O): turns a
+  `PlannedChange[]` into what a dry-run or an apply result prints —
+  `changeViews` (before/after `Tx`, `fields`, and, for `delete`, the full
+  cached `raw` row), `balanceImpact` (net per-account, per-currency
+  delta), `tableRows` (`--format table`), and `applyCommand` (the
+  ready-to-paste `zm ... --apply --expect <token>` string, shell-quoted).
+- **Apply** (`write/apply.ts`'s `runWrite`, the only module in the feature
+  that touches the network or writes to the store): sequences the I/O
+  around planning/presentation. A dry-run just plans and prints, no
+  network. `--apply` syncs, re-plans against the post-sync cache, checks
+  the plan token, and — only if it still matches — sends one write.
+
+### Plan token
+
+`write/plan.ts: planToken` hashes a canonical (recursively key-sorted)
+JSON encoding of `[{ op, id, baseChanged, set }]`, sorted by `id`, where
+`baseChanged` is the target's cached `changed` (`null` for `create`) —
+the first 16 hex characters of the sha256 digest. A dry-run computes this
+over what it would send and prints it inside the `applyCommand` it shows
+(e.g. `zm edit t1 --comment Netflix --apply --expect 9f2c1a3b4d5e6f70`).
+`--apply` recomputes the same hash from the post-sync cache and rejects a
+mismatch as `CONFLICT` (exit 7) — this is what turns "the plan you're
+about to send" into something checkable against "the plan the caller
+actually looked at," without keeping any server-side state.
+
+`CONFLICT` isn't only an `--apply` outcome, though: `zm add`'s own
+Planner (see above) throws it on a plain dry-run too, whenever the
+requested `--id` already names a transaction with different content —
+there's no plan token to compare yet at that point, since the caller
+hasn't seen one.
+
+### Retry detection ("already-in-state" filtering)
+
+Both the dry-run and `--apply` branches of `runWrite` call `splitPending`,
+which drops from the plan any change whose target already matches it
+(`plan.ts: isApplied`) before the token is computed — a change already
+landed is never treated as blocking the rest of a multi-target edit, and
+is never resent. `isApplied` compares only the fields in `set` (minus
+`merchant`, since the server may re-link a merchant from a new payee on
+its own) for `update`; `CREATE_COMPARE_FIELDS` (date, amounts, accounts,
+instruments, tag, payee, comment — never `hold`/`user`/`created`/
+`changed`, which the server is free to normalise) for `create`; and
+`deleted === true` (or the row being gone entirely) for `delete`. `null`,
+`undefined`, and `""` all compare equal, since the server's echo of an
+unset field isn't guaranteed to use the same one of the three the caller
+sent.
+
+A dry-run with some targets already in state warns `already in that
+state: <ids>`, or, if every target is, `nothing to change: already in
+that state`. `--apply` with everything already in state exits 0 with
+`applied: true` and `warnings: ["already applied"]`, no POST made — this,
+not any request idempotency key, is what makes rerunning the exact same
+`--apply --expect <token>` command safe after a network error or a
+cache-write failure: the retry's own sync sees the first run's write
+already landed, and `splitPending` drops it before anything is sent
+again.
+
+### The write itself
+
+`--apply`:
+
+1. Validate `--expect` (and, for `add`, `--id`) before opening the store —
+   the same rule as every other command's flag-shape validation.
+2. An incremental sync (the same `fetchDiff`/`applyDiff` path as `zm
+   sync`), applied to the cache, so the plan is rebuilt from the freshest
+   known server state before anything is sent.
+3. Re-plan from the post-sync cache (calling the same Planner the
+   dry-run used, now with `postSync: true`), run `splitPending`. Two
+   command-specific checks can throw `CONFLICT` right here, inside the
+   Planner itself, before `runWrite` even reaches the token check: `zm
+   add`'s Planner re-runs its own id-exists check (see "Planning" above)
+   against the freshly synced cache; `zm edit`'s Planner throws
+   `"transaction was deleted or is gone"` if the sync just found one of
+   the targets deleted or removed outright. On a plain dry-run
+   (`postSync: false`), the same missing/already-deleted condition is
+   `INVALID_ARGS` (exit 2) instead — a target that was never there, or was
+   already deleted, before the caller even asked for anything is a plain
+   mistake to report as such; the same condition discovered by the sync
+   `--apply` just ran is instead a conflict, since there's nothing left to
+   write for a plan the caller already committed to. `write/apply.ts`
+   itself then repeats the create-id-exists check once more, over
+   whatever's left in `pending`, as a defensive backstop — reachable only
+   if something slips past the Planner's own check, since a `create` id
+   that already exists with different content is normally already caught
+   the moment `zm add` re-plans in this same step.
+4. Compare `planToken(pending)` against `--expect`; a mismatch throws
+   `CONFLICT` (`"the data changed since the dry-run"`, hint `"rerun
+   without --apply to review the current state"`).
+5. One `fetchDiff` call carrying a `transaction` payload: each pending
+   change's `next` raw object, with `changed = max(nowSec, (base.changed
+   ?? 0) + 1)` (a clock-skew guard — the server resolves conflicting
+   writes last-write-wins by `changed`) and, for `create`, `created` set
+   to that same value.
+6. `store.applyDiff` the response. If that throws (e.g. `CACHE_BUSY`,
+   `SQLITE_FULL`) after the POST already succeeded, `runWrite` still
+   reports `applied: true`, with a `warnings` entry: `"written to
+   ZenMoney, but the local cache was not updated: run zm sync"`. Then, for
+   every pending change whose id the response's `transaction` array
+   doesn't contain, a `warnings` entry names it and points at `zm sync
+   --full` — see "API facts" below (fact 5) for why.
+7. A failure during the POST (step 5) is re-thrown as `NETWORK` (exit 4),
+   with a hint that depends on what kind of failure it was: a transport
+   failure, an HTTP 5xx, or a malformed/unparseable response leave the
+   write's outcome genuinely unknown, so the hint is `"the change may have
+   been written; run the same command again, it is safe to retry"` — see
+   "Retry detection" above for why that's actually true. An HTTP 4xx means
+   ZenMoney rejected the request outright before writing anything (401/403
+   are handled earlier, as `AUTH`, not `NETWORK`), so the hint is instead
+   `"ZenMoney rejected the write; nothing was changed. Rerun without
+   --apply to review the plan"`. `zm` never retries automatically on its
+   own.
+
+The window between step 2 (sync) and step 5 (POST) — a change landing on
+the server in between, from the app or another process — cannot be closed
+with this protocol (there is no server-side lock this CLI can take); it is
+accepted, not handled. In the worst case it surfaces as the server's own
+last-write-wins resolution rather than as a `zm`-detected `CONFLICT`.
+
+### API facts
+
+These are not established by any live call against the real API (which
+this repository's own rules forbid from an agent session) — they come
+from the ZenPlugins wiki's "ZenMoney-API" page (Transaction schema, Diff
+object, sync semantics) and the open-source client zerro
+(`github.com/ardov/zerro`, `src/5-entities/transaction/thunks.ts`,
+`src/6-shared/api/zenmoney/fetchDiff.ts`).
+
+1. **Balances**: the server maintains `account.balance`; clients push only
+   `transaction` objects (zerro never sends `account` on a transaction
+   write). Confidence medium-high, so `runWrite` treats it as a fact to
+   verify rather than trust outright: after `--apply`, for every account
+   `balanceImpact` reports as non-zero, if the response diff contains no
+   updated version of that account, a `warnings` entry names it and says
+   to check it in ZenMoney.
+2. **Deletion**: a deleted transaction is sent as an ordinary member of
+   the `transaction` array with `deleted: true` set (what zerro does) —
+   the response diff's separate `deletion` array is ZenMoney's own
+   permanent-removal path and is never used by `zm`.
+3. **Response shape**: symmetric to a normal sync — a diff of everything
+   changed since the `serverTimestamp` this POST sent (the write just made
+   included) plus a new `serverTimestamp`. All timestamps are Unix
+   seconds; conflicting writes resolve server-side by `changed`
+   (last-write-wins), which is why step 5 above pushes `changed` forward
+   past `now` when needed.
+4. **Required `Transaction` fields**: `id, changed, created, user,
+   deleted, incomeInstrument, incomeAccount, income, outcomeInstrument,
+   outcomeAccount, outcome, date`. `plan.ts: planAdd` sets exactly these
+   plus whichever optional ones the caller passed (`tag`, `payee`,
+   `comment`), always with `merchant: null` and `hold: false`.
+5. **Echo**: per fact 3 above, the response diff's `transaction` array
+   should include every transaction the request just wrote. Confidence
+   medium-high, same as fact 1, so `runWrite` treats it as a fact to
+   verify rather than trust outright: after `--apply`, for every pending
+   change whose id the response's `transaction` array doesn't contain, a
+   `warnings` entry names it and points at `zm sync --full`. The push
+   payload itself is never written into the local cache directly — only
+   what `store.applyDiff` actually applies from the response is.
 
 ## Transaction classification
 
@@ -447,6 +639,7 @@ shape. `cli/output.ts: printError` prints `{"error": {"code", "message",
 | `NETWORK` | 4 | network failure or non-2xx ZenMoney response |
 | `NO_CACHE` | 5 | no local cache yet (`zm sync` hasn't run), or the cache file/a row is corrupted |
 | `CACHE_BUSY` | 6 | cache is locked by another connection (e.g. a concurrent `zm sync`) |
+| `CONFLICT` | 7 | `zm add` (dry-run or `--apply`): `--id` already exists with different content. `zm edit`/`zm add`/`zm delete --apply`: the recomputed plan token doesn't match `--expect`, or (edit only) a target was deleted or removed by the sync `--apply` just ran — see "Write flow" above |
 
 Option-shape validation (e.g. an unknown `--by`, an invalid `--month`) runs
 *before* the cache is opened, so a bad invocation fails the same way whether
@@ -481,10 +674,16 @@ months, and never suggesting a limit `<= 0`.
 
 ## Design decisions
 
-- **Read-only.** `zm` never writes to ZenMoney — no operations, no
-  categories, no ZenMoney-side budgets. This removes an entire class of
-  risk (an agent silently altering a user's real financial data) for a tool
-  whose job is to answer questions, not to manage the account.
+- **Dry-run-first writes, not read-only.** `zm edit`/`zm add`/`zm delete`
+  are the only commands that write to ZenMoney, and only transactions —
+  never accounts, categories, or ZenMoney-side budgets. Every one of them
+  is a dry-run by default; a write happens only when the caller reruns the
+  exact `applyCommand` a dry-run printed, carrying `--apply --expect
+  <token>` (see "Write flow" above). This keeps most of plain read-only's
+  safety property — nothing changes without the caller having seen exactly
+  what would change and asked for it again by rerunning that command — while
+  still allowing the one thing read-only couldn't: fixing a mistake (e.g. a
+  mistyped comment) from the CLI instead of the ZenMoney app.
 - **No currency conversion.** Every sum and aggregate is reported per
   currency; the CLI never adds amounts in different currencies. A mixed
   total is a different, error-prone kind of number (it depends on which

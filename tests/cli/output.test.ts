@@ -24,6 +24,9 @@ it('maps ZmError to exit code and json', () => {
 it('unknown errors exit 1', () => {
   expect(printError(new Error('boom'), 'json', () => {})).toBe(1)
 })
+it('maps a CONFLICT ZmError to exit code 7', () => {
+  expect(printError(new ZmError('CONFLICT', 'server has a newer version'), 'json', () => {})).toBe(7)
+})
 // A-9: column widths must be computed with a loop, not `Math.max(...bigArray)`
 // (spreading a huge array into a function call blows the stack).
 it('renders a very large table without throwing (no Math.max(...array) stack overflow)', () => {

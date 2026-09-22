@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest'
-import { categoryPath, loadDataset, meUser, merchantLabel, NO_CATEGORY, type Dataset, type Tx } from '../../src/query/model.js'
+import { categoryPath, loadDataset, meUser, merchantLabel, NO_CATEGORY, toTx, type Dataset, type Tx } from '../../src/query/model.js'
 import { parseOwnersFile } from '../../src/query/owners.js'
 import { fixtureStore } from '../helpers.js'
 import { Store } from '../../src/store/store.js'
@@ -310,7 +310,7 @@ it('expense: an unknown primary account/instrument id falls back to the raw id, 
 it('meUser throws NO_CACHE when the dataset has no main user', () => {
   const noMainUser: Dataset = {
     users: [{ id: 1, login: 'x', currency: 3, parent: 99, changed: 0 }],
-    accounts: new Map(), tags: new Map(), instruments: new Map(), txs: [],
+    accounts: new Map(), tags: new Map(), instruments: new Map(), merchants: new Map(), txs: [],
     ownerNames: null, ownerOf: new Map(), ownersPath: null, ownerWarnings: [], ownerConflicts: [],
   }
   expect(() => meUser(noMainUser)).toThrow(expect.objectContaining({ code: 'NO_CACHE' }))
@@ -336,6 +336,15 @@ it('merchantLabel prefers merchant, then payee, then originalPayee, then comment
 it('merchantLabel returns null when merchant, payee, originalPayee, and comment are all empty or whitespace-only', () => {
   expect(merchantLabel(labelTx({}))).toBeNull()
   expect(merchantLabel(labelTx({ merchant: '  ', payee: '\t', originalPayee: '', comment: '   ' }))).toBeNull()
+})
+it('toTx matches loadDataset rows and is null for deleted / zero rows', () => {
+  const s = fixtureStore()
+  const dsResult = loadDataset(s)
+  const raw = s.getTransaction('t1')!
+  expect(toTx(raw, dsResult)).toEqual(dsResult.txs.find(t => t.id === 't1'))
+  expect(toTx({ ...raw, deleted: true }, dsResult)).toBeNull()
+  expect(toTx({ ...raw, income: 0, outcome: 0 }, dsResult)).toBeNull()
+  expect(dsResult.merchants.get('m-fresh')?.title).toBe('FreshMart')
 })
 it('merchantLabel trims the winning field', () => {
   expect(merchantLabel(labelTx({ comment: '  Music Plus  ' }))).toEqual({ label: 'Music Plus', source: 'comment' })

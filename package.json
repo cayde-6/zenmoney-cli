@@ -1,7 +1,7 @@
 {
   "name": "@cayde-6/zenmoney-cli",
   "version": "0.1.1",
-  "description": "Read-only ZenMoney CLI for agents: transactions, per-currency analytics and a local budget",
+  "description": "ZenMoney CLI: read-only analysis, plus dry-run-first writes (zm edit/add/delete)",
   "type": "module",
   "bin": {
     "zm": "dist/bin.js"

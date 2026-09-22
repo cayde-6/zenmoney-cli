@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Transaction writes**: `zm edit <ids...>`, `zm add`, and `zm delete
+  <ids...>` — the only commands that write to ZenMoney, and only
+  transactions. Every one is a dry-run by default: it prints `{ applied,
+  token, applyCommand, changes, balanceImpact }`, and writing requires
+  rerunning the exact printed `applyCommand` (`--apply --expect <token>`).
+  `--apply` re-syncs and recomputes the plan first; a change already in
+  its target state is dropped (so retrying a landed write after a network
+  error is safe). `zm edit` can change `--comment`/`--payee`/`--category`/
+  `--date` on any transaction, and `--amount`/`--account` on a
+  single-currency simple one (a transfer, a debt, or a foreign-currency
+  transaction rejects the latter two, exit 2, no partial edit). `zm add`
+  creates a new single-currency simple transaction. `zm delete` marks a
+  transaction deleted, the same as deleting it in the app; its dry-run
+  shows the full raw copy of what would be deleted. `--owner` other than
+  `all` is rejected by all three.
+- Exit code 7 (`CONFLICT`), used by the three write commands above, for
+  three distinct causes: a plan token that no longer matches `--expect`
+  on `--apply`; `zm add --id <uuid>` naming an id that already exists
+  with different content, even on a plain dry-run; and `zm edit --apply`
+  finding a target deleted or gone after the sync it just ran. Every case
+  says to rerun the dry-run and review the current state.
+
+### Changed
+
+- `zm` is no longer strictly read-only: `zm edit`/`zm add`/`zm delete
+  --apply` write transactions to ZenMoney (see "Added" above). Every other
+  command is unaffected and stays read-only.
+
 ## [0.1.1] - 2026-09-17
 
 ### Changed

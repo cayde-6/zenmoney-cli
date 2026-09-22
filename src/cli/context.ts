@@ -6,6 +6,7 @@ import { resolvePaths } from '../paths.js'
 import { ZmError } from '../errors.js'
 import os from 'node:os'
 import { existsSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import type { Readable } from 'node:stream'
 
 export interface AppContext {
@@ -20,6 +21,7 @@ export interface AppContext {
   isTTY: boolean
   keychain: Keychain | null // null when not on macOS
   openStore: () => Store // opens paths.cacheDb; used by commands
+  uuid: () => string // injected so tests get deterministic ids
 }
 
 // Reads a stream to completion, guarded by a timeout that applies only while
@@ -99,5 +101,6 @@ export function realContext(overrides: {
       if (!existsSync(paths.cacheDb)) throw new ZmError('NO_CACHE', 'no local cache', 'run zm sync')
       return Store.open(paths.cacheDb, { platform })
     },
+    uuid: () => randomUUID(),
   }
 }

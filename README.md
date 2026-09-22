@@ -6,16 +6,18 @@
 [![CI](https://github.com/cayde-6/zenmoney-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/cayde-6/zenmoney-cli/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/cayde-6/zenmoney-cli/branch/main/graph/badge.svg)](https://codecov.io/gh/cayde-6/zenmoney-cli)
 
-A read-only command-line client for [ZenMoney](https://zenmoney.ru/): `zm`
-reads your transactions, accounts and categories and reports spend, income,
+A command-line client for [ZenMoney](https://zenmoney.ru/): `zm` reads your
+transactions, accounts and categories and reports spend, income,
 comparisons and recurring payments — always per currency, never mixed —
 plus a local, file-based monthly budget checked against your actual spend.
+It can also edit, add, and delete transactions, dry-run first.
 
 ## Why
 
-- **Read-only.** `zm` never writes anything back to ZenMoney: no
-  transactions, no categories, no ZenMoney-side budgets. The only things it
-  writes locally are its own cache and, if you ask it to, budget yaml files.
+- **Dry-run first.** `zm` only writes to ZenMoney with `--apply --expect
+  <token>` from a dry-run you have seen; only transactions are ever
+  written. Every other write is local: its own cache and, if you ask it
+  to, budget yaml files. See "Writing transactions" below.
 - **Per-currency, on purpose.** Amounts in different currencies are never
   added together. Every aggregate is reported per currency — a mixed total
   is a different, error-prone kind of number, so it's left to you (or your
@@ -39,8 +41,11 @@ plus a local, file-based monthly budget checked against your actual spend.
   spending history.
 - `--format json` (default, for scripts and agents) or `--format table`
   (for humans).
-- Everything except `zm auth`/`zm sync` runs fully offline, against a local
-  SQLite cache.
+- Editing, adding, and deleting transactions (`zm edit`/`zm add`/`zm
+  delete`), dry-run by default — see "Writing transactions" below.
+- Every read command, and every dry-run, runs fully offline, against a
+  local SQLite cache; only `zm auth`, `zm sync`, and `--apply` on a write
+  command make a network call.
 
 ## Install
 
@@ -234,6 +239,9 @@ zm recurring [--months <n>] [--min-months <n>]
 zm budget init [--force]
 zm budget status [--month <YYYY-MM>]
 zm budget suggest [--months <n>] [--month <YYYY-MM>]
+zm edit <ids...> [--comment <text>] [--payee <text>] [--category <query>] [--date <date>] [--amount <n>] [--account <query>] [--apply --expect <token>]
+zm add (--expense <n>|--income <n>) --account <query> [--category <query>] [--date <date>] [--comment <text>] [--payee <text>] [--id <uuid>] [--apply --expect <token>]
+zm delete <ids...> [--apply --expect <token>]
 ```
 
 Run `zm <command> --help` for the exact flags and worked examples of any
@@ -243,9 +251,10 @@ always in sync with the installed version.
 ## Global options & filters
 
 All commands accept global `--format json|table` (default `json`) and
-`--owner <value>` (default `all`) — though `categories`, `rates`, and
-`owners` reject any `--owner` value other than `all` (see below) rather
-than accepting and ignoring it. `--owner` has two different sets of valid
+`--owner <value>` (default `all`) — though `categories`, `rates`,
+`owners`, `zm edit`, `zm add`, and `zm delete` reject any `--owner` value
+other than `all` (see below) rather than accepting and ignoring it.
+`--owner` has two different sets of valid
 values, depending on whether `<configDir>/owners.yaml` exists — see
 "Owners" below for the full explanation:
 
@@ -274,10 +283,13 @@ commands":
   than `all` with exit code 2 (none of the three has a per-owner concept —
   `owners` *lists* owners, it isn't filtered by one), rather than silently
   ignoring it — `--owner all` (the default) is accepted since it's a
-  no-op. Elsewhere, `--owner` only has an effect on `users`, `accounts`,
-  `tx`, `spend`, `income`, `compare`, `recurring`, `budget status`, and
-  `budget suggest` — `auth`, `sync`, `status`, and `budget init` accept the
-  flag but it has no effect on any of them.
+  no-op. `zm edit`, `zm add`, and `zm delete` reject any `--owner` value
+  other than `all` the same way (exit 2) — they target explicit
+  transaction ids, not an owner-filtered set, so there's nothing for
+  `--owner` to do. Elsewhere, `--owner` only has an effect on `users`,
+  `accounts`, `tx`, `spend`, `income`, `compare`, `recurring`, `budget
+  status`, and `budget suggest` — `auth`, `sync`, `status`, and `budget
+  init` accept the flag but it has no effect on any of them.
 - `users` is always filtered by ZenMoney-user semantics
   (`me|all|<id>|<login>`), never by `owners.yaml` names — but once
   `owners.yaml` exists, it *also* rejects any non-`all` value outright
@@ -481,6 +493,120 @@ Workflow:
    writes a file. Review it, then save it as a month override or fold it
    into `default.yaml`.
 
+## Writing transactions
+
+`zm edit`, `zm add`, and `zm delete` are the only commands that write to
+ZenMoney, and they only ever write transactions — never accounts,
+categories, or anything else. Every one of them is a dry-run by default:
+it validates the request, computes what would change, and prints it
+without making any network call. Nothing is written until you rerun the
+exact `applyCommand` the dry-run printed, which carries `--apply --expect
+<token>`:
+
+```
+$ zm edit t1 --comment Netflix
+```
+
+```json
+{
+  "data": {
+    "applied": false,
+    "token": "9f2c1a3b4d5e6f70",
+    "applyCommand": "zm edit t1 --comment Netflix --apply --expect 9f2c1a3b4d5e6f70",
+    "changes": [
+      {
+        "op": "update",
+        "id": "t1",
+        "before": { "id": "t1", "date": "2026-09-02", "type": "expense", "amount": 3000, "currency": "PLN", "accountId": "acc-pln", "accountTitle": "Card PLN", "categoryPath": "Groceries", "merchant": "FreshMart", "payee": null, "comment": null },
+        "after": { "id": "t1", "date": "2026-09-02", "type": "expense", "amount": 3000, "currency": "PLN", "accountId": "acc-pln", "accountTitle": "Card PLN", "categoryPath": "Groceries", "merchant": "FreshMart", "payee": null, "comment": "Netflix" },
+        "fields": ["comment"]
+      }
+    ],
+    "balanceImpact": []
+  },
+  "meta": { "lastSyncAt": "2026-09-20T12:00:00.000Z" }
+}
+```
+
+(`before`/`after` are full `Tx` rows — a few fields shown here for brevity; a
+comment-only edit leaves `balanceImpact` empty, since it doesn't change any
+account's balance.)
+
+```
+$ zm edit t1 --comment Netflix --apply --expect 9f2c1a3b4d5e6f70
+```
+
+### Plan token and retry safety
+
+`token` is a hash of exactly what the dry-run would send (which
+transactions, which raw fields, and their new values). `--apply` runs an
+incremental sync first, recomputes the same plan against the freshly
+synced cache, and only sends the write if the recomputed token still
+matches `--expect`. A mismatch exits **7 (CONFLICT)**, with a hint to
+rerun the dry-run and review the current state — this is what catches a
+change made in the ZenMoney app, by another `zm` run, or by an
+intervening `zm sync` since the dry-run. `zm edit --apply` also exits 7 if
+the sync it just ran finds a target deleted or gone entirely.
+
+Exit 7 isn't limited to `--apply`: `zm add --id <uuid>` also exits 7 on a
+plain dry-run if that id already exists with different content (the same
+check runs again during `--apply`, in case it exists by then even though
+it didn't at dry-run time).
+
+Because of that re-sync-and-recompute step, it's always safe to rerun the
+exact same `--apply --expect <token>` command again after a transport
+failure, an HTTP 5xx, or a malformed response from ZenMoney — exit **4
+(NETWORK)** with the hint "the change may have been written; run the same
+command again, it is safe to retry", since whether the write actually
+landed is unknown. An HTTP 4xx response is different: ZenMoney rejected
+the request outright before writing anything, so the hint instead says
+"ZenMoney rejected the write; nothing was changed. Rerun without --apply
+to review the plan" — retrying the identical `--apply` would just fail
+again. A change that already matches its requested state is dropped from
+the plan before the token is recomputed (`warnings: ["already in that
+state: <ids>"]`); if every change in the plan already landed, the command
+exits 0 with `applied: true` and `warnings: ["already applied"]`, and
+nothing is sent again. A dry-run whose plan is empty for the same reason
+(every target already matches the requested state) prints `applyCommand:
+null` instead of a command to rerun — there is nothing to apply. `zm`
+itself never retries automatically.
+
+### What can be written
+
+- `zm edit <ids...>`: `--comment`, `--payee`, `--category`, and `--date`
+  work on any transaction; `--comment ""` and `--payee ""` clear the
+  field. A non-empty `--payee` also clears any linked merchant (`--payee
+  ""` clears only the payee — merchant is left alone). `--amount` and
+  `--account` only work on a single-currency simple transaction
+  (classified `expense`, `income`, or `refund`, same currency on both
+  sides) — using either on a transfer, a debt, or a foreign-currency
+  transaction fails the whole command with exit 2, with no partial edit.
+- `zm add`: creates a new single-currency simple transaction — exactly one
+  of `--expense`/`--income`, a required `--account`, and optional
+  `--category`/`--date` (default: today)/`--comment`/`--payee`. Transfers,
+  debts, and foreign-currency transactions can't be created, only edited
+  (restricted fields above) or deleted. A dry-run without `--id` generates
+  a UUID and includes it in the printed `applyCommand`, so retrying the
+  same command always targets the same transaction; `--apply` requires
+  `--id`.
+- `zm delete <ids...>`: marks the transaction deleted in ZenMoney, the same
+  as deleting it from the app. The dry-run's `changes[].raw` carries the
+  full cached copy of each transaction that would be deleted — there is no
+  separate local undo.
+- `--owner` other than `all` is rejected by all three commands.
+
+`balanceImpact` reports the net change to each affected account's balance,
+per account and currency, never summed across currencies. It's a safety
+net, not an authority: the ZenMoney server recomputes the real balance,
+and if its response to `--apply` doesn't include an updated version of an
+affected account, a `warnings` entry says to check that account in
+ZenMoney. Similarly, if that response doesn't echo back one of the
+transactions just written, a `warnings` entry names it and points at `zm
+sync --full` to make sure the local cache matches ZenMoney — the write
+already happened either way (the POST is what succeeded or failed, not
+this check), and the payload sent is never written into the local cache
+directly, only whatever the response actually confirms.
+
 ## Output & exit codes
 
 Every read command prints `{ data, meta, warnings? }` as JSON (or a table
@@ -499,6 +625,7 @@ is 3 days old, run zm sync"` is added — the data is still returned.
 | 4 | network or ZenMoney API error |
 | 5 | no local cache (run `zm sync`), or the cache file is unreadable/corrupted (delete it and run `zm sync --full`) |
 | 6 | cache is busy (another `zm sync` is running) — retry in a few seconds |
+| 7 | `zm add` (dry-run or `--apply`): the given `--id` already exists with different content. `zm edit`/`zm add`/`zm delete --apply`: the recomputed plan no longer matches `--expect` (or, for `edit`, a target was deleted or removed by the sync `--apply` just ran) — rerun the dry-run and review the current state |
 
 Errors are printed to stderr as `{"error": {"code", "message", "hint"}}`
 (plain text with `--format table`).
@@ -514,7 +641,9 @@ Errors are printed to stderr as `{"error": {"code", "message", "hint"}}`
   `XDG_CACHE_HOME` is invalid per the XDG spec and is ignored, falling back
   to the default.
 - The only network calls this CLI makes are to `api.zenmoney.ru`, and only
-  from `zm auth` (to validate a token) and `zm sync` (to download changes).
+  from `zm auth` (to validate a token), `zm sync` (to download changes),
+  and `zm edit`/`zm add`/`zm delete --apply` (to sync, then write) — every
+  other command, and every write command's dry-run, is fully offline.
 - On macOS, `zm auth` prefers storing the token in the Keychain (service
   `zenmoney-cli`) over `config.json`; `config.json` is written atomically
   (a temp file at mode `600`, renamed into place) when the Keychain isn't
@@ -523,12 +652,14 @@ Errors are printed to stderr as `{"error": {"code", "message", "hint"}}`
   with `PRAGMA journal_mode=WAL`/`busy_timeout=5000` so concurrent `zm`
   invocations don't corrupt it (a still-locked cache surfaces as exit code
   6 rather than hanging). A stored token is only looked up by `zm sync`
-  (to call the API) and `zm status` (to report where a token would come
-  from — `zm status` never reads or prints the token's actual value, only
-  its `source`); `zm auth` validates whatever token you just gave it,
-  before saving it, rather than looking up a previously stored one. Every
-  other read command works purely off the local cache and never touches
-  the token at all. The lookup order, when it happens, is: `ZENMONEY_TOKEN`
+  and `zm edit`/`zm add`/`zm delete --apply` (both call the API), and by
+  `zm status` (to report where a token would come from — `zm status`
+  never reads or prints the token's actual value, only its `source`);
+  `zm auth` validates whatever token you just gave it, before saving it,
+  rather than looking up a previously stored one. Every other read
+  command, and every write command's dry-run, works purely off the local
+  cache and never touches the token at all. The lookup order, when it
+  happens, is: `ZENMONEY_TOKEN`
   env var, then macOS Keychain, then `config.json`. Set
   `ZM_DISABLE_KEYCHAIN=1` to skip the Keychain entirely (e.g. in sandboxes
   without `security` access) and fall back to `config.json`. If a Keychain
@@ -536,9 +667,10 @@ Errors are printed to stderr as `{"error": {"code", "message", "hint"}}`
   `config.json` (`{ "saved": "config" }`) and adds a `warnings` entry:
   `"could not store the token in macOS Keychain, saved to <configFile>
   instead"`.
-- Network requests to `api.zenmoney.ru` (`zm auth`, `zm sync`) time out
-  after `ZM_TIMEOUT_MS` milliseconds (default `60000`); it must be a
-  positive integer, or the command fails fast with `INVALID_ARGS`.
+- Network requests to `api.zenmoney.ru` (`zm auth`, `zm sync`, and `zm
+  edit`/`zm add`/`zm delete --apply`) time out after `ZM_TIMEOUT_MS`
+  milliseconds (default `60000`); it must be a positive integer, or the
+  command fails fast with `INVALID_ARGS`.
 
 ## Using with AI agents
 

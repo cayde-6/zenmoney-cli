@@ -1,5 +1,5 @@
 import type { Store } from '../store/store.js'
-import type { ZmAccount, ZmInstrument, ZmTag, ZmTransaction, ZmUser } from '../api/types.js'
+import type { ZmAccount, ZmInstrument, ZmMerchant, ZmTag, ZmTransaction, ZmUser } from '../api/types.js'
 import { ZmError } from '../errors.js'
 import { matchOwners, type OwnerConflict, type OwnerConflictMode, type OwnersFile } from './owners.js'
 
@@ -26,7 +26,7 @@ export interface Tx {
 
 export interface Dataset {
   users: ZmUser[]; accounts: Map<string, ZmAccount>; tags: Map<string, ZmTag>
-  instruments: Map<number, ZmInstrument>; txs: Tx[]
+  instruments: Map<number, ZmInstrument>; merchants: Map<string, ZmMerchant>; txs: Tx[]
   // null when no owners.yaml exists at all — callers (see query/filters.ts's
   // resolveOwner vs. resolveOwnerName) use that to decide whether `--owner`
   // still means today's ZenMoney-user semantics (me/login/id) or the new
@@ -94,6 +94,111 @@ function topCategoryIdOf(tagId: string | null, tags: Map<string, ZmTag>): string
   return tags.has(tag.parent) ? tag.parent : tag.id
 }
 
+// The lookups toTx needs to turn one raw ZmTransaction into a Tx: exactly the
+// maps loadDataset already builds (a Dataset satisfies this), plus ownerOf
+// (owners.yaml's accountId -> owner name, separate from Dataset's other
+// owners.yaml fields since toTx only ever needs this one map of it).
+export interface TxLookups {
+  accounts: Map<string, ZmAccount>; tags: Map<string, ZmTag>
+  instruments: Map<number, ZmInstrument>; merchants: Map<string, ZmMerchant>
+  ownerOf: Map<string, string>
+}
+
+// Turns one raw ZmTransaction into a Tx, or null for a row loadDataset's own
+// loop would have skipped (deleted, or carrying no money at all) — the exact
+// per-row body of that loop, pulled out so write-mode commands (see
+// docs/architecture.md) can classify a single freshly-fetched/pushed
+// transaction the same way loadDataset classifies a whole store, without
+// reloading the entire dataset.
+export function toTx(t: ZmTransaction, l: TxLookups): Tx | null {
+  const { accounts, tags, instruments, merchants, ownerOf } = l
+  if (t.deleted) return null
+  if (t.income === 0 && t.outcome === 0) return null // carries no money, never a real expense/income
+  const type = classify(t, accounts, tags)
+  const firstTagId = t.tag?.[0] ?? null
+  // A tag id that doesn't resolve to any known tag (deleted/never-synced)
+  // is treated exactly like no tag at all: categoryId/topCategoryId null,
+  // categoryPath the shared NO_CATEGORY constant.
+  const catId = firstTagId !== null && tags.has(firstTagId) ? firstTagId : null
+  const catPath = categoryPath(catId, tags)
+  const topCategoryId = topCategoryIdOf(catId, tags)
+
+  const payee = t.payee ? t.payee.trim() || null : null
+  const merchantTitle = t.merchant ? merchants.get(t.merchant)?.title : undefined
+  const merchant = merchantTitle ? merchantTitle.trim() || null : null
+  const comment = t.comment ? t.comment.trim() || null : null
+  const hold = t.hold ?? false
+  const originalPayee = t.originalPayee ? t.originalPayee.trim() || null : null
+
+  let accountId: string, amount: number, instrumentId: number
+  let counterpart: Tx['counterpart']
+
+  if (type === 'expense') {
+    accountId = t.outcomeAccount
+    amount = t.outcome
+    instrumentId = t.outcomeInstrument
+  } else if (type === 'income' || type === 'refund') {
+    accountId = t.incomeAccount
+    amount = t.income
+    instrumentId = t.incomeInstrument
+  } else if (type === 'transfer') {
+    accountId = t.outcomeAccount
+    amount = t.outcome
+    instrumentId = t.outcomeInstrument
+    const cpAccount = accounts.get(t.incomeAccount)
+    counterpart = {
+      accountId: t.incomeAccount,
+      accountTitle: cpAccount?.title ?? t.incomeAccount,
+      amount: t.income,
+      currency: instruments.get(t.incomeInstrument)?.shortTitle ?? '',
+    }
+  } else {
+    // debt: primary side is the non-debt account
+    const outcomeIsDebt = accounts.get(t.outcomeAccount)?.type === 'debt'
+    if (outcomeIsDebt) {
+      accountId = t.incomeAccount
+      amount = t.income
+      instrumentId = t.incomeInstrument
+      const cpAccount = accounts.get(t.outcomeAccount)
+      counterpart = {
+        accountId: t.outcomeAccount,
+        accountTitle: cpAccount?.title ?? t.outcomeAccount,
+        amount: t.outcome,
+        currency: instruments.get(t.outcomeInstrument)?.shortTitle ?? '',
+      }
+    } else {
+      accountId = t.outcomeAccount
+      amount = t.outcome
+      instrumentId = t.outcomeInstrument
+      const cpAccount = accounts.get(t.incomeAccount)
+      counterpart = {
+        accountId: t.incomeAccount,
+        accountTitle: cpAccount?.title ?? t.incomeAccount,
+        amount: t.income,
+        currency: instruments.get(t.incomeInstrument)?.shortTitle ?? '',
+      }
+    }
+  }
+
+  const account = accounts.get(accountId)
+  const ownerId = account?.user ?? t.user
+  const owner = ownerOf.get(accountId) ?? null
+
+  return {
+    id: t.id, date: t.date, type,
+    amount, currency: instruments.get(instrumentId)?.shortTitle ?? '',
+    accountId, accountTitle: account?.title ?? accountId, ownerId, owner,
+    categoryId: catId, topCategoryId,
+    categoryPath: catPath,
+    merchant,
+    payee,
+    comment,
+    hold,
+    originalPayee,
+    ...(counterpart ? { counterpart } : {}),
+  }
+}
+
 // `ownersFile` is the already-parsed owners.yaml (see query/owners.ts's
 // loadOwnersFile), or null/omitted when the family has no owners.yaml at
 // all — every CLI command that opens a Dataset loads it once from
@@ -117,99 +222,17 @@ export function loadDataset(store: Store, ownersFile: OwnersFile | null = null, 
   const ownerMatch = ownersFile ? matchOwners(accounts, ownersFile, conflictMode) : { ownerOf: new Map<string, string>(), warnings: [], conflicts: [] }
   const ownerOf = ownerMatch.ownerOf
 
+  const lookups: TxLookups = { accounts, tags, instruments, merchants, ownerOf }
   const txs: Tx[] = []
   for (const t of store.all('transaction')) {
-    if (t.deleted) continue
-    if (t.income === 0 && t.outcome === 0) continue // carries no money, never a real expense/income
-    const type = classify(t, accounts, tags)
-    const firstTagId = t.tag?.[0] ?? null
-    // A tag id that doesn't resolve to any known tag (deleted/never-synced)
-    // is treated exactly like no tag at all: categoryId/topCategoryId null,
-    // categoryPath the shared NO_CATEGORY constant.
-    const catId = firstTagId !== null && tags.has(firstTagId) ? firstTagId : null
-    const catPath = categoryPath(catId, tags)
-    const topCategoryId = topCategoryIdOf(catId, tags)
-
-    const payee = t.payee ? t.payee.trim() || null : null
-    const merchantTitle = t.merchant ? merchants.get(t.merchant)?.title : undefined
-    const merchant = merchantTitle ? merchantTitle.trim() || null : null
-    const comment = t.comment ? t.comment.trim() || null : null
-    const hold = t.hold ?? false
-    const originalPayee = t.originalPayee ? t.originalPayee.trim() || null : null
-
-    let accountId: string, amount: number, instrumentId: number
-    let counterpart: Tx['counterpart']
-
-    if (type === 'expense') {
-      accountId = t.outcomeAccount
-      amount = t.outcome
-      instrumentId = t.outcomeInstrument
-    } else if (type === 'income' || type === 'refund') {
-      accountId = t.incomeAccount
-      amount = t.income
-      instrumentId = t.incomeInstrument
-    } else if (type === 'transfer') {
-      accountId = t.outcomeAccount
-      amount = t.outcome
-      instrumentId = t.outcomeInstrument
-      const cpAccount = accounts.get(t.incomeAccount)
-      counterpart = {
-        accountId: t.incomeAccount,
-        accountTitle: cpAccount?.title ?? t.incomeAccount,
-        amount: t.income,
-        currency: instruments.get(t.incomeInstrument)?.shortTitle ?? '',
-      }
-    } else {
-      // debt: primary side is the non-debt account
-      const outcomeIsDebt = accounts.get(t.outcomeAccount)?.type === 'debt'
-      if (outcomeIsDebt) {
-        accountId = t.incomeAccount
-        amount = t.income
-        instrumentId = t.incomeInstrument
-        const cpAccount = accounts.get(t.outcomeAccount)
-        counterpart = {
-          accountId: t.outcomeAccount,
-          accountTitle: cpAccount?.title ?? t.outcomeAccount,
-          amount: t.outcome,
-          currency: instruments.get(t.outcomeInstrument)?.shortTitle ?? '',
-        }
-      } else {
-        accountId = t.outcomeAccount
-        amount = t.outcome
-        instrumentId = t.outcomeInstrument
-        const cpAccount = accounts.get(t.incomeAccount)
-        counterpart = {
-          accountId: t.incomeAccount,
-          accountTitle: cpAccount?.title ?? t.incomeAccount,
-          amount: t.income,
-          currency: instruments.get(t.incomeInstrument)?.shortTitle ?? '',
-        }
-      }
-    }
-
-    const account = accounts.get(accountId)
-    const ownerId = account?.user ?? t.user
-    const owner = ownerOf.get(accountId) ?? null
-
-    txs.push({
-      id: t.id, date: t.date, type,
-      amount, currency: instruments.get(instrumentId)?.shortTitle ?? '',
-      accountId, accountTitle: account?.title ?? accountId, ownerId, owner,
-      categoryId: catId, topCategoryId,
-      categoryPath: catPath,
-      merchant,
-      payee,
-      comment,
-      hold,
-      originalPayee,
-      ...(counterpart ? { counterpart } : {}),
-    })
+    const tx = toTx(t, lookups)
+    if (tx) txs.push(tx)
   }
 
   txs.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))
 
   return {
-    users, accounts, tags, instruments, txs, ownerNames, ownerOf,
+    users, accounts, tags, instruments, merchants, txs, ownerNames, ownerOf,
     ownersPath: ownersFile ? ownersPath : null,
     ownerWarnings: ownerMatch.warnings,
     ownerConflicts: ownerMatch.conflicts,

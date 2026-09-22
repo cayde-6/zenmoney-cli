@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { dirname } from 'node:path'
-import { ENTITY_KINDS, type EntityKind, type EntityMap, type ZmDeletion, type ZmDiff } from '../api/types.js'
+import { ENTITY_KINDS, type EntityKind, type EntityMap, type ZmDeletion, type ZmDiff, type ZmTransaction } from '../api/types.js'
 import { ZmError } from '../errors.js'
 import { ensureDirMode, chmodIfExists } from '../fsutil.js'
 
@@ -190,6 +190,25 @@ export class Store {
         // A row whose `raw` column isn't valid JSON means the cache itself is
         // corrupted (this table is never written with anything but
         // JSON.stringify'd data) — same recovery as a corrupted db file.
+        throw corruptCacheError(this.file)
+      }
+    })
+  }
+
+  // The raw row for a single transaction id, deleted ones included (unlike
+  // all('transaction'), which every read command already filters through
+  // loadDataset) — used by write-mode commands that need to look up a
+  // transaction's current server state before editing/deleting it. null when
+  // no row with that id has ever been synced.
+  getTransaction(id: string): ZmTransaction | null {
+    return this.guard(() => {
+      const row = this.db.prepare(`SELECT raw FROM "transaction" WHERE id = ?`).get(id) as { raw: string } | undefined
+      if (!row) return null
+      try {
+        return JSON.parse(row.raw) as ZmTransaction
+      } catch {
+        // Same corruption -> NO_CACHE mapping as all() above: this table is
+        // never written with anything but JSON.stringify'd data.
         throw corruptCacheError(this.file)
       }
     })
