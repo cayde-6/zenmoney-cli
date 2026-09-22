@@ -1,6 +1,6 @@
 # Transaction write mode (`zm edit` / `add` / `delete`) — design
 
-Status: draft v2 (after review), awaiting approval. Target release: 0.2.0
+Status: approved v3 (API facts resolved). Target release: 0.2.0
 (minor).
 
 ## Goal
@@ -17,8 +17,7 @@ pass back the plan token of a dry-run you have seen"**.
   ones can still be edited (restricted fields, below) and deleted.
 - Selecting targets by filter. `edit` and `delete` take explicit ids only;
   ids come from `zm tx ... | jq -r '.data[].id'`.
-- Writing any entity other than transactions (and accounts' `balance`, only
-  if the balance question below requires it).
+- Writing any entity other than transactions.
 - A local undo/trash. The dry-run output contains the full raw copy of
   every transaction it deletes.
 - A declarative change file. Can be layered on later.
@@ -149,8 +148,7 @@ verbatim) → compute token → print. No network.
    - `transaction`: edited/created objects with
      `changed = max(nowSec, base.changed + 1)` (clock-skew guard); created
      get `created = changed`;
-   - deletions: exact wire format to be confirmed (below);
-   - `account`: only if the balance question requires it.
+   - deleted ones as the cached raw with `deleted: true` (see API facts);
    `fetchDiff` is generalised to take an optional payload rather than a
    second HTTP function being written.
 6. Apply the response diff to the cache with `applyDiff`, store its
@@ -167,19 +165,33 @@ The window between step 2 and step 5 (a change landing on the server in
 between) cannot be closed with this protocol; it is documented, not
 handled.
 
-## Open questions — resolve before implementation, without the live API
+## API facts (resolved from docs, no live calls)
 
-From the ZenMoney API docs (ZenPlugins wiki) and open-source clients:
-1. Does the server recompute `account.balance` after transaction writes, or
-   must clients send updated accounts? If the latter, `balanceImpact` is
-   applied to the affected raw accounts and sent in the same POST.
-2. Deletion wire format: `deletion: [{ id, object: "transaction", stamp,
-   user }]` vs. sending the transaction with `deleted: true`.
-3. What the POST response contains (only changes since the sent
-   `serverTimestamp`, including ours?).
+Sources: ZenPlugins wiki "ZenMoney-API" (Transaction schema, Diff object,
+sync semantics); the open-source client zerro (github.com/ardov/zerro,
+`src/5-entities/transaction/thunks.ts`, `src/6-shared/api/zenmoney/fetchDiff.ts`).
 
-Answers are recorded in `docs/architecture.md`; if any answer contradicts
-this spec, the spec is updated before coding.
+1. **Balances**: the server maintains `account.balance`; clients push only
+   `transaction` objects (zerro never sends `account` on transaction
+   writes). Confidence medium-high, so as a safety net: after `--apply`, if
+   `balanceImpact` is non-zero for an account and the response diff contains
+   no updated version of that account, add a warning ("account balance was
+   not updated by the server; check it in ZenMoney").
+2. **Deletion**: send the transaction with `deleted: true` in the
+   `transaction` array (what zerro does). The `deletion` array is ZenMoney's
+   permanent-removal path and is not used.
+3. **Response**: symmetric to the request — a diff of everything changed
+   since the sent `serverTimestamp` (our own writes included) plus a new
+   `serverTimestamp`. Conflicts resolve server-side by `changed`
+   (last-write-wins), hence the skew guard. All timestamps are Unix
+   seconds.
+4. **Required Transaction fields**: `id, changed, created, user, deleted,
+   incomeInstrument, incomeAccount, income, outcomeInstrument,
+   outcomeAccount, outcome, date`. A created transaction sets exactly these
+   plus the optional ones the user passed (`tag`, `payee`, `comment`), with
+   `merchant: null`, `hold: false`.
+
+These are recorded in `docs/architecture.md` as part of the implementation.
 
 ## Errors
 
@@ -210,7 +222,8 @@ this spec, the spec is updated before coding.
 - `--apply` with mocked `fetch`: success; CONFLICT on token mismatch;
   already-applied (edit/add/delete) and partial retry; 401; network error;
   POST ok but cache write fails → exit 0 + warning; request body
-  (`serverTimestamp`, `changed` skew guard, deletion format).
+  (`serverTimestamp`, `changed` skew guard, `deleted: true`); missing
+  account update in the response → balance warning.
 - e2e (built binary): dry-run over the synthetic fixture, no network;
   `--apply` without `--expect` exits 2.
 - Synthetic data only. Coverage thresholds unchanged.
@@ -219,5 +232,5 @@ this spec, the spec is updated before coding.
 
 README (drop "Read-only", new commands, plan token), SKILL.md (rule +
 table), `docs/architecture.md` (write flow, token, CONFLICT, answers to the
-open questions), CLAUDE.md ("Never" list), CHANGELOG `[Unreleased]`, exit
+API facts), CLAUDE.md ("Never" list), CHANGELOG `[Unreleased]`, exit
 code 7 wherever exit codes are listed.
