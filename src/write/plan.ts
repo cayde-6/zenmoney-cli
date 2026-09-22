@@ -74,6 +74,13 @@ export function planEdit(ds: Dataset, targets: ZmTransaction[], f: EditFields): 
     }
   }
 
+  if (f.amount !== undefined) {
+    const noAmountIds = targets.filter(t => t.income === 0 && t.outcome === 0).map(t => t.id)
+    if (noAmountIds.length > 0) {
+      throw new ZmError('INVALID_ARGS', '--amount cannot change a transaction with no amount', noAmountIds.join(', '))
+    }
+  }
+
   return targets.map(base => {
     const set: Record<string, unknown> = {}
 
@@ -100,6 +107,9 @@ export function planEdit(ds: Dataset, targets: ZmTransaction[], f: EditFields): 
     if (f.accountId !== undefined) {
       const account = ds.accounts.get(f.accountId)
       if (!account) throw new ZmError('INVALID_ARGS', `unknown account: ${f.accountId}`, 'pass an existing account id')
+      if (account.type === 'debt') {
+        throw new ZmError('INVALID_ARGS', 'cannot move a transaction to a debt account', 'edit debt-account moves in the ZenMoney app instead')
+      }
       if (account.instrument !== base.outcomeInstrument) {
         throw new ZmError('INVALID_ARGS', 'target account has a different currency', 'edit currency-changing moves in the ZenMoney app instead')
       }
@@ -115,6 +125,9 @@ export function planEdit(ds: Dataset, targets: ZmTransaction[], f: EditFields): 
 export function planAdd(ds: Dataset, input: AddInput): PlannedChange[] {
   const account = ds.accounts.get(input.accountId)
   if (!account) throw new ZmError('INVALID_ARGS', `unknown account: ${input.accountId}`, 'pass an existing account id')
+  if (account.type === 'debt') {
+    throw new ZmError('INVALID_ARGS', 'cannot add a transaction on a debt account', 'add debt-account transactions in the ZenMoney app instead')
+  }
   if (account.instrument === null) {
     throw new ZmError('INVALID_ARGS', `account has no currency: ${input.accountId}`, 'pick a different account')
   }
@@ -130,8 +143,8 @@ export function planAdd(ds: Dataset, input: AddInput): PlannedChange[] {
     outcomeInstrument: instrument,
     tag: input.categoryId ? [input.categoryId] : null,
     merchant: null,
-    payee: input.payee ?? null,
-    comment: input.comment ?? null,
+    payee: input.payee ? input.payee : null,
+    comment: input.comment ? input.comment : null,
     hold: false,
     deleted: false,
   }
@@ -167,9 +180,30 @@ export function planToken(changes: PlannedChange[]): string {
   return createHash('sha256').update(canonical(rows)).digest('hex').slice(0, 16)
 }
 
+// `create`'s retry check only compares the fields that actually describe the
+// transaction's money/where/what — never `hold`/`merchant`/`user`/`created`/
+// `changed` (some of `set`'s other keys) — because the server is free to
+// normalise those, or an empty string, when it echoes a write back in the
+// response diff or a later sync. Comparing the full `set` there would make a
+// write that landed exactly as planned look like a conflict just because
+// ZenMoney's own echo differs from our request in an insignificant way.
+const CREATE_COMPARE_FIELDS = [
+  'date', 'income', 'outcome', 'incomeAccount', 'outcomeAccount',
+  'incomeInstrument', 'outcomeInstrument', 'tag', 'payee', 'comment',
+]
+
+// null, undefined, and '' are the same "nothing here" for retry-detection
+// purposes, for the same reason as CREATE_COMPARE_FIELDS above: the server's
+// echo of an unset field isn't guaranteed to use the same one of the three
+// we sent.
+function normalizeForCompare(v: unknown): unknown {
+  return v === undefined || v === null || v === '' ? null : v
+}
+
 export function isApplied(c: PlannedChange, current: ZmTransaction | null): boolean {
   if (c.op === 'delete') return current === null || current.deleted === true
   if (current === null || current.deleted) return false
   const row = current as unknown as Record<string, unknown>
-  return Object.keys(c.set).every(k => isDeepStrictEqual(row[k], c.set[k]))
+  const keys = c.op === 'create' ? CREATE_COMPARE_FIELDS : Object.keys(c.set)
+  return keys.every(k => isDeepStrictEqual(normalizeForCompare(row[k]), normalizeForCompare(c.set[k])))
 }

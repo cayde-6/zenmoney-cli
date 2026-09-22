@@ -59,15 +59,67 @@ it('accountId rejects an unknown account', () => {
   expect(() => planEdit(ds, [t1], { accountId: 'nope' })).toThrow(/unknown account: nope/)
 })
 
-it('amount on a restricted tx fails the whole call', () => {
+it('amount on a restricted tx fails the whole call, as an INVALID_ARGS error naming the restricted id', () => {
   const fx = { ...t1, id: 'fx', opOutcome: 5, opOutcomeInstrument: 1 }
-  expect(() => planEdit(ds, [t1, fx], { amount: 1 })).toThrow(/transfer, debt, or foreign-currency/)
+  expect.assertions(5)
+  try {
+    planEdit(ds, [t1, fx], { amount: 1 })
+  } catch (e) {
+    expect(e).toBeInstanceOf(ZmError)
+    expect((e as ZmError).code).toBe('INVALID_ARGS')
+    expect((e as ZmError).message).toMatch(/transfer, debt, or foreign-currency/)
+    expect((e as ZmError).hint).toBe('fx')
+  }
   expect(planEdit(ds, [fx], { comment: 'ok' })[0]!.set).toEqual({ comment: 'ok' })
 })
 
-it('account on a restricted tx fails the whole call', () => {
+it('account on a restricted tx fails the whole call, as an INVALID_ARGS error naming the restricted id', () => {
   const t7 = s.getTransaction('t7')! // transfer
-  expect(() => planEdit(ds, [t7], { accountId: 'acc-partner' })).toThrow(/transfer, debt, or foreign-currency/)
+  expect.assertions(4)
+  try {
+    planEdit(ds, [t7], { accountId: 'acc-partner' })
+  } catch (e) {
+    expect(e).toBeInstanceOf(ZmError)
+    expect((e as ZmError).code).toBe('INVALID_ARGS')
+    expect((e as ZmError).message).toMatch(/transfer, debt, or foreign-currency/)
+    expect((e as ZmError).hint).toBe('t7')
+  }
+})
+
+it('the restricted-call error hint lists every restricted id, not just the first', () => {
+  const fx1 = { ...t1, id: 'fx1', opOutcome: 5, opOutcomeInstrument: 1 }
+  const t7 = s.getTransaction('t7')! // transfer
+  expect.assertions(2)
+  try {
+    planEdit(ds, [fx1, t7, t1], { amount: 1 })
+  } catch (e) {
+    expect((e as ZmError).code).toBe('INVALID_ARGS')
+    expect((e as ZmError).hint).toBe('fx1, t7')
+  }
+})
+
+it('amount on a target with no amount at all fails the whole call, independent of the restricted check', () => {
+  const zero1 = { ...t1, id: 'zero1', income: 0, outcome: 0 }
+  const zero2 = { ...t1, id: 'zero2', income: 0, outcome: 0 }
+  expect.assertions(3)
+  try {
+    planEdit(ds, [zero1, zero2, t1], { amount: 5 })
+  } catch (e) {
+    expect(e).toBeInstanceOf(ZmError)
+    expect((e as ZmError).code).toBe('INVALID_ARGS')
+    expect((e as ZmError).hint).toBe('zero1, zero2')
+  }
+})
+
+it('accountId to a debt account is rejected', () => {
+  expect.assertions(3)
+  try {
+    planEdit(ds, [t1], { accountId: 'acc-debt' })
+  } catch (e) {
+    expect(e).toBeInstanceOf(ZmError)
+    expect((e as ZmError).code).toBe('INVALID_ARGS')
+    expect((e as ZmError).message).toMatch(/cannot move a transaction to a debt account/)
+  }
 })
 
 it('parseAmount accepts 33.88 and a bare integer, rejects 1e3, -1, 0, 1.234, " 5", empty, non-numeric', () => {
@@ -127,8 +179,25 @@ it('planAdd sets tag/payee/comment when given, and defaults them to null otherwi
   expect(c!.next).toMatchObject({ tag: ['salary'], payee: 'P', comment: 'C', income: 1, outcome: 0 })
 })
 
+it('planAdd normalises an empty comment/payee to null, like planEdit', () => {
+  const [c] = planAdd(ds, { id: 'i3', kind: 'expense', amount: 1, accountId: 'acc-pln', date: '2026-09-20', comment: '', payee: '' })
+  expect(c!.next.comment).toBeNull()
+  expect(c!.next.payee).toBeNull()
+})
+
 it('planAdd rejects an unknown account', () => {
   expect(() => planAdd(ds, { id: 'x', kind: 'income', amount: 1, accountId: 'nope', date: '2026-09-20' })).toThrow(/unknown account: nope/)
+})
+
+it('planAdd rejects a debt account', () => {
+  expect.assertions(3)
+  try {
+    planAdd(ds, { id: 'x', kind: 'expense', amount: 1, accountId: 'acc-debt', date: '2026-09-20' })
+  } catch (e) {
+    expect(e).toBeInstanceOf(ZmError)
+    expect((e as ZmError).code).toBe('INVALID_ARGS')
+    expect((e as ZmError).message).toMatch(/cannot add a transaction on a debt account/)
+  }
 })
 
 it('planAdd rejects an account with no currency', () => {
@@ -169,20 +238,42 @@ it('token is deterministic, order-independent, and changes with base.changed and
   expect(planToken([cCreate])).toHaveLength(16)
 })
 
-it('isApplied for update/create/delete', () => {
+it('isApplied for update', () => {
   const cUpdate: PlannedChange = { op: 'update', id: 't1', base: t1, next: { ...t1, comment: 'x' }, set: { comment: 'x' } }
   expect(isApplied(cUpdate, { ...t1, comment: 'x' })).toBe(true)
   expect(isApplied(cUpdate, { ...t1, comment: 'y' })).toBe(false)
   expect(isApplied(cUpdate, null)).toBe(false)
   expect(isApplied(cUpdate, { ...t1, comment: 'x', deleted: true })).toBe(false)
+})
 
-  const newTx: ZmTransaction = { ...t1, id: 'newTx' }
-  const cCreate: PlannedChange = { op: 'create', id: 'newTx', base: null, next: newTx, set: { comment: newTx.comment } }
-  expect(isApplied(cCreate, newTx)).toBe(true)
-  expect(isApplied(cCreate, null)).toBe(false)
+it('isApplied for update treats null/undefined/"" in a set field as the same "nothing"', () => {
+  const cUpdate: PlannedChange = { op: 'update', id: 't1', base: t1, next: { ...t1, comment: null }, set: { comment: null } }
+  expect(isApplied(cUpdate, { ...t1, comment: undefined } as unknown as ZmTransaction)).toBe(true)
+  expect(isApplied(cUpdate, { ...t1, comment: '' })).toBe(true)
+  expect(isApplied(cUpdate, { ...t1, comment: 'still there' })).toBe(false)
+})
 
+it('isApplied for delete', () => {
   const cDelete: PlannedChange = { op: 'delete', id: 't1', base: t1, next: { ...t1, deleted: true }, set: {} }
   expect(isApplied(cDelete, null)).toBe(true)
   expect(isApplied(cDelete, { ...t1, deleted: true })).toBe(true)
   expect(isApplied(cDelete, t1)).toBe(false)
+})
+
+it('isApplied for create compares only the core money/where/what fields, tolerating a server-normalised echo', () => {
+  const [c] = planAdd(ds, { id: 'i4', kind: 'expense', amount: 9.5, accountId: 'acc-pln', date: '2026-09-20', categoryId: 'food' })
+  expect(isApplied(c!, null)).toBe(false)
+
+  // exact echo plus server-assigned created/changed: applied
+  expect(isApplied(c!, { ...c!.next, created: 123, changed: 123 })).toBe(true)
+
+  // server normalises hold to null, merchant goes missing, comment comes back
+  // '' instead of null: still applied — none of those are core fields, and
+  // null/undefined/'' are equivalent for the ones that are compared
+  const { merchant: _merchant, ...nextWithoutMerchant } = c!.next
+  const echo = { ...nextWithoutMerchant, created: 123, changed: 123, hold: null, comment: '' } as unknown as ZmTransaction
+  expect(isApplied(c!, echo)).toBe(true)
+
+  // a core field actually differs: not applied
+  expect(isApplied(c!, { ...c!.next, outcome: 1 })).toBe(false)
 })
