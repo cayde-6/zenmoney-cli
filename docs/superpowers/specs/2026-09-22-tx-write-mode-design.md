@@ -134,14 +134,17 @@ verbatim) → compute token → print. No network.
 `--apply`:
 1. Validate; `--expect` and (for `add`) `--id` present.
 2. Incremental sync via the existing sync path; apply to cache.
-3. **Retry detection** (per target, post-sync):
-   - edit: every field in `set` already equals the planned value →
-     already applied;
-   - add: id exists and matches the planned object → already applied;
-     exists but differs → CONFLICT;
-   - delete: target is `deleted` or listed in a deletion → already applied.
-   If *all* targets are already applied: exit 0, `applied: true`,
-   `warnings: ["already applied"]`, no POST. If only some are: CONFLICT.
+3. **Already-in-state filter** (both modes, per change): a change whose
+   target already matches it (`isApplied`) is dropped from the plan before
+   the token is computed.
+   - edit: every field in `set` (except `merchant`, which the server may
+     re-link) equals the planned value, with `null`/missing/`""` equal;
+   - add: the id exists and its core fields (date, amounts, accounts,
+     instruments, tag, payee, comment) match; exists but differs → CONFLICT;
+   - delete: target is `deleted` or gone.
+   Dry-run warns `already in that state: <ids>`. On `--apply`, nothing left
+   → exit 0, `applied: true`, `warnings: ["already applied"]`, no POST —
+   this is how a retry of a landed write is recognised.
 4. Recompute the plan from the post-sync cache; token mismatch → CONFLICT.
 5. One `POST /v8/diff` with the post-sync `serverTimestamp` and
    `currentClientTimestamp`, plus:
@@ -202,7 +205,7 @@ These are recorded in `docs/architecture.md` as part of the implementation.
 | unreachable, timeout, 5xx (token scrubbed as today) | NETWORK (4) |
 | no cache | NO_CACHE (5) |
 | cache busy before the POST | CACHE_BUSY (6) |
-| token mismatch, partial retry, `add` id exists with different content | CONFLICT (7) — new |
+| token mismatch (incl. a partially landed batch), `add` id exists with different content | CONFLICT (7) — new |
 
 ## Agent rules
 
@@ -220,7 +223,8 @@ These are recorded in `docs/architecture.md` as part of the implementation.
   `op*`), token determinism and sensitivity, amount/date validation,
   per-currency `balanceImpact`, income↔refund reclassification shown.
 - `--apply` with mocked `fetch`: success; CONFLICT on token mismatch;
-  already-applied (edit/add/delete) and partial retry; 401; network error;
+  already-applied (edit/add/delete), a target already in state before the
+  dry-run; 401; network error;
   POST ok but cache write fails → exit 0 + warning; request body
   (`serverTimestamp`, `changed` skew guard, `deleted: true`); missing
   account update in the response → balance warning.
