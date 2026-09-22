@@ -3,10 +3,31 @@ import { balanceImpact, changeViews, tableRows, shellQuote, applyCommand } from 
 import { planAdd, planDelete, planEdit, type PlannedChange } from '../../src/write/plan.js'
 import { loadDataset, type Dataset } from '../../src/query/model.js'
 import { fixtureStore } from '../helpers.js'
-import type { ZmTransaction } from '../../src/api/types.js'
+import type { ZmAccount, ZmTransaction } from '../../src/api/types.js'
 
 const s = fixtureStore()
 const ds: Dataset = loadDataset(s)
+
+// Clones a Dataset with extra/overridden accounts merged in, for tests that
+// need account shapes the shared fixture doesn't have (a duplicate title,
+// an instrument id that doesn't resolve).
+function withAccounts(base: Dataset, accounts: ZmAccount[]): Dataset {
+  const accountsMap = new Map(base.accounts)
+  for (const a of accounts) accountsMap.set(a.id, a)
+  return { ...base, accounts: accountsMap }
+}
+
+// A minimal synthetic single-currency-simple create change contributing
+// `amount` to `accountId`, for tests that only care about balanceImpact's
+// account/sort handling and not about a realistic plan.
+function creditChange(id: string, accountId: string, amount: number): PlannedChange {
+  const next: ZmTransaction = {
+    id, user: 10, date: '2026-09-01', income: amount, outcome: 0,
+    incomeAccount: accountId, outcomeAccount: accountId, incomeInstrument: 100, outcomeInstrument: 100,
+    tag: null, merchant: null, payee: null, comment: null, deleted: false, created: 1, changed: 1,
+  }
+  return { op: 'create', id, base: null, next, set: {} }
+}
 
 // balanceImpact
 
@@ -50,6 +71,52 @@ it('balanceImpact: unknown account falls back to its id and empty currency', () 
   const next: ZmTransaction = { ...base, outcome: 50 }
   const changes: PlannedChange[] = [{ op: 'update', id: 'x', base, next, set: { outcome: 50 } }]
   expect(balanceImpact(ds, changes)).toEqual([{ accountId: 'ghost', accountTitle: 'ghost', currency: '', delta: 50 }])
+})
+
+it('balanceImpact: deleting a cross-currency transfer produces one entry per side', () => {
+  const t7 = s.getTransaction('t7')! // transfer: 100 EUR out of acc-eur, 11700 PLN into acc-pln
+  expect(t7.outcome).toBe(100)
+  expect(t7.outcomeAccount).toBe('acc-eur')
+  expect(t7.income).toBe(11700)
+  expect(t7.incomeAccount).toBe('acc-pln')
+  const impact = balanceImpact(ds, planDelete([t7]))
+  expect(impact).toEqual([
+    { accountId: 'acc-pln', accountTitle: 'Card PLN', currency: 'PLN', delta: -11700 },
+    { accountId: 'acc-eur', accountTitle: 'Cash EUR', currency: 'EUR', delta: 100 },
+  ])
+})
+
+it('balanceImpact: deleting a debt row produces one entry per side', () => {
+  const t8 = s.getTransaction('t8')! // debt: 50 EUR out of acc-eur, 50 EUR into acc-debt
+  expect(t8.outcome).toBe(50)
+  expect(t8.outcomeAccount).toBe('acc-eur')
+  expect(t8.income).toBe(50)
+  expect(t8.incomeAccount).toBe('acc-debt')
+  const impact = balanceImpact(ds, planDelete([t8]))
+  expect(impact).toEqual([
+    { accountId: 'acc-eur', accountTitle: 'Cash EUR', currency: 'EUR', delta: 50 },
+    { accountId: 'acc-debt', accountTitle: 'Debts', currency: 'EUR', delta: -50 },
+  ])
+})
+
+it('balanceImpact: accounts tied on title sort by accountId ascending', () => {
+  const tied = (id: string): ZmAccount => ({
+    id, user: 10, instrument: 100, type: 'cash', title: 'Same Title', balance: 0, inBalance: true, archive: false, changed: 1,
+  })
+  const dsTied = withAccounts(ds, [tied('acc-c'), tied('acc-a'), tied('acc-b')])
+  // Insertion order deliberately not id-ascending, so the result only
+  // matches if the tie-break sort actually runs (both its arms: acc-a
+  // sorts before acc-b, and acc-c sorts after both).
+  const changes = [creditChange('y1', 'acc-c', 10), creditChange('y2', 'acc-a', 20), creditChange('y3', 'acc-b', 30)]
+  const impact = balanceImpact(dsTied, changes)
+  expect(impact.map(i => i.accountId)).toEqual(['acc-a', 'acc-b', 'acc-c'])
+})
+
+it('balanceImpact: a known account with an unresolvable instrument id falls back to empty currency', () => {
+  const weird: ZmAccount = { id: 'acc-weird', user: 10, instrument: 424242, type: 'cash', title: 'Weird', balance: 0, inBalance: true, archive: false, changed: 1 }
+  const dsWeird = withAccounts(ds, [weird])
+  const impact = balanceImpact(dsWeird, [creditChange('y4', 'acc-weird', 5)])
+  expect(impact).toEqual([{ accountId: 'acc-weird', accountTitle: 'Weird', currency: '', delta: 5 }])
 })
 
 // changeViews
@@ -141,19 +208,23 @@ it('shellQuote: single-quotes and escapes embedded single quotes', () => {
   expect(shellQuote("it's")).toBe("'it'\\''s'")
 })
 
+it('shellQuote: a leading = is quoted even though = is otherwise a safe character (zsh EQUALS expansion)', () => {
+  expect(shellQuote('=total')).toBe("'=total'")
+})
+
+it('shellQuote: = elsewhere in the string stays unquoted', () => {
+  expect(shellQuote('a=b')).toBe('a=b')
+  expect(shellQuote('--expect=old')).toBe('--expect=old')
+})
+
 // applyCommand
 
-it('applyCommand: drops a trailing --expect flag and appends fresh --apply --expect', () => {
-  expect(applyCommand(['edit', 't1', '--comment', 'a b', '--expect', 'old'], 'tok'))
+it('applyCommand: appends --apply --expect verbatim after argv, quoting only what needs it', () => {
+  expect(applyCommand(['edit', 't1', '--comment', 'a b'], 'tok'))
     .toBe("zm edit t1 --comment 'a b' --apply --expect tok")
 })
 
-it('applyCommand: drops --expect=value form and a bare --apply', () => {
-  expect(applyCommand(['edit', 't1', '--apply', '--expect=old'], 'tok'))
-    .toBe('zm edit t1 --apply --expect tok')
-})
-
-it('applyCommand: no existing apply/expect flags to drop', () => {
-  expect(applyCommand(['add', '--amount', '5'], 'tok'))
-    .toBe('zm add --amount 5 --apply --expect tok')
+it('applyCommand: does not strip or special-case a value that is itself --apply (caller guarantees argv has no real --apply/--expect)', () => {
+  expect(applyCommand(['edit', 't1', '--comment', '--apply'], 'tok'))
+    .toBe('zm edit t1 --comment --apply --apply --expect tok')
 })

@@ -49,7 +49,14 @@ export function balanceImpact(ds: Dataset, changes: PlannedChange[]): BalanceImp
     const currency = account?.instrument != null ? (ds.instruments.get(account.instrument)?.shortTitle ?? '') : ''
     result.push({ accountId, accountTitle: account?.title ?? accountId, currency, delta })
   }
-  result.sort((a, b) => (a.accountTitle < b.accountTitle ? -1 : a.accountTitle > b.accountTitle ? 1 : 0))
+  result.sort((a, b) => {
+    if (a.accountTitle < b.accountTitle) return -1
+    if (a.accountTitle > b.accountTitle) return 1
+    // Two accounts can share a display title (nothing stops that in
+    // ZenMoney) — break the tie on accountId so the order is deterministic
+    // rather than dependent on Map/sort implementation details.
+    return a.accountId < b.accountId ? -1 : 1
+  })
   return result
 }
 
@@ -88,22 +95,22 @@ export function tableRows(changes: PlannedChange[]): TableRow[] {
 
 const SHELL_SAFE_RE = /^[A-Za-z0-9_\-.,:/@=+]+$/
 
+// A leading '=' is unsafe even though '=' itself is in the safe charset
+// above (needed for e.g. `--expect=old`): zsh's EQUALS expansion turns a
+// bare `=word` argument into the resolved path of the `word` command, so a
+// value that happens to start with '=' must always be quoted.
 export function shellQuote(s: string): string {
-  if (SHELL_SAFE_RE.test(s)) return s
+  if (!s.startsWith('=') && SHELL_SAFE_RE.test(s)) return s
   return `'${s.replaceAll("'", "'\\''")}'`
 }
 
+// argv is the user's original arguments after `zm` (e.g. ['edit', 't1',
+// '--comment', 'Higgs field']), exactly as invoked for the dry run this
+// apply command is offered from. The caller guarantees argv carries no
+// --apply/--expect of its own (dry-run's own arg parsing already rejects
+// a --apply/--expect it wasn't given a plan token for) — so this never
+// strips or rewrites anything, only appends the two flags that turn the
+// same invocation into the apply one.
 export function applyCommand(argv: string[], token: string): string {
-  const filtered: string[] = []
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!
-    if (a === '--apply') continue
-    if (a === '--expect') {
-      i++ // also drop its value
-      continue
-    }
-    if (a.startsWith('--expect=')) continue
-    filtered.push(a)
-  }
-  return ['zm', ...filtered, '--apply', '--expect', token].map(shellQuote).join(' ')
+  return ['zm', ...argv, '--apply', '--expect', token].map(shellQuote).join(' ')
 }
