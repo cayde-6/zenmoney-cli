@@ -1,177 +1,223 @@
-# Transaction write mode (`zm tx edit` / `add` / `delete`) — design
+# Transaction write mode (`zm edit` / `add` / `delete`) — design
 
-Status: draft, awaiting review. Target release: 0.2.0 (minor).
+Status: draft v2 (after review), awaiting approval. Target release: 0.2.0
+(minor).
 
 ## Goal
 
 Let `zm` create, edit, and delete ZenMoney transactions, so a mistake found
 while analysing spending (e.g. a mistyped comment) can be fixed from the CLI
 instead of the ZenMoney app. This deliberately ends `zm`'s "read-only"
-guarantee; the replacement guarantee is **"nothing is written without
-`--apply`"**.
+guarantee; the replacement guarantee is **"nothing is written unless you
+pass back the plan token of a dry-run you have seen"**.
 
 ## Non-goals (v1)
 
-- Creating transfers, debts, or multi-currency transactions (two sides and
-  an exchange rate — a separate feature). They can still be edited (fields
-  listed below) and deleted.
-- Writing any entity other than transactions (and, if required by the
-  balance question below, accounts' `balance`): no categories, merchants,
-  accounts, or ZenMoney-side budgets.
-- A local undo/trash. Deletion is ZenMoney's own deletion; the dry-run
-  output contains the full `before` copy of every deleted transaction.
-- A declarative change file (`zm apply changes.yaml`). Can be layered on
-  top of these commands later.
+- Creating transfers, debts, or foreign-currency transactions. Existing
+  ones can still be edited (restricted fields, below) and deleted.
+- Selecting targets by filter. `edit` and `delete` take explicit ids only;
+  ids come from `zm tx ... | jq -r '.data[].id'`.
+- Writing any entity other than transactions (and accounts' `balance`, only
+  if the balance question below requires it).
+- A local undo/trash. The dry-run output contains the full raw copy of
+  every transaction it deletes.
+- A declarative change file. Can be layered on later.
+
+## Terms
+
+- **Single-currency simple transaction**: classified `expense`, `income`, or
+  `refund` by `classify` (`src/query/model.ts`), with
+  `incomeInstrument === outcomeInstrument` and none of `opIncome`,
+  `opOutcome`, `opIncomeInstrument`, `opOutcomeInstrument` set (non-null,
+  non-zero). Everything else — `transfer`, `debt`, or anything with `op*`
+  set (a purchase in a foreign currency) — is **restricted**.
+- **Target lookup** reads the raw `transaction` table directly, not
+  `loadDataset`, so zero-amount rows are editable too. A target with
+  `deleted: true` is "already deleted" (see retries).
 
 ## Commands
 
-All three are subcommands of `zm tx`. `zm tx [filters]` without a
-subcommand keeps its current behaviour.
+Top-level commands — not subcommands of `zm tx`: the `tx` command already
+owns `--category`/`--account`/`--search`/`--type`/`--limit`, and commander
+hands those to the parent (`enablePositionalOptions` would fix that but
+break `--format`/`--owner` placed after a subcommand everywhere).
 
-Common flags: `--apply` (without it: dry-run), `--format json|table`.
-`--owner` is rejected with any value other than `all` (exit 2) — writes have
-no owner semantics.
+Common flags: `--apply`, `--expect <token>`, `--format json|table`.
+`--owner` other than `all` exits 2. `--apply` without `--expect` exits 2.
 
-### `zm tx edit [id...]`
+### `zm edit <id...>`
 
-Selection — exactly one of:
-- one or more transaction ids as positional arguments;
-- the `zm tx` filters: `--from/--to/--month`, `--category`, `--account`,
-  `--currency`, `--type`, `--search`.
+Field flags (at least one, else exit 2):
 
-Mixing ids and filters, or giving neither, exits 2. With filters, if more
-than `--max <n>` (default 10) transactions match, exit 2 with the match
-count in the message; raise `--max` explicitly to go further. Zero matches
-is not an error: `applied: false`, empty `changes`, and a `warnings` entry.
-
-Field flags (at least one required, else exit 2):
-
-| Flag | Allowed on | Notes |
+| Flag | Allowed on | Effect on raw |
 |---|---|---|
-| `--comment <text>` | all types | `""` clears |
-| `--payee <text>` | all types | `""` clears |
-| `--category <query>` | all types | same resolver as the filter; replaces `tag` with `[id]` |
-| `--date YYYY-MM-DD` | all types | |
-| `--amount <n>` | expense, income, refund | positive decimal; sets the one non-zero side |
-| `--account <query>` | expense, income, refund | target account must have the same currency |
+| `--comment <text>` | all | `comment`; `""` sets `null` |
+| `--payee <text>` | all | `payee`; also sets `merchant: null`, since `merchantLabel` prefers a merchant and the new payee would otherwise be invisible. Shown in `fields`. `""` sets `payee: null` (merchant untouched). |
+| `--category <query>` | all | `tag: [id]` via the existing category resolver. May turn income into refund or back (`classify`); visible as `before.type` vs `after.type`. |
+| `--date YYYY-MM-DD` | all | `date` |
+| `--amount <n>` | single-currency simple | the one non-zero side (`outcome` or `income`) |
+| `--account <query>` | single-currency simple | both `incomeAccount` and `outcomeAccount` (they are equal on simple transactions); target account must have the same instrument, else exit 2 |
 
-`--amount`/`--account` on a transfer, debt, or multi-currency transaction
-exits 2, and the whole command fails (no partial edit of a mixed
-selection).
+A restricted target with `--amount`/`--account` fails the whole command
+(exit 2) — no partial edit.
 
-Note the ambiguity: `--category`, `--account` are both filters and field
-flags. Resolution: in `edit`, filters use the `--where-` prefix
-(`--where-category`, `--where-account`, `--where-currency`,
-`--where-type`, `--where-search`, `--where-from/--where-to/--where-month`);
-the unprefixed names are always field setters. This keeps each flag with a
-single meaning.
+### `zm add`
 
-### `zm tx add`
+- Exactly one of `--expense <n>` / `--income <n>`.
+- `--account <query>` required; instrument is the account's. Both account
+  fields and both instrument fields are set to it; the non-used side is 0.
+- Optional: `--category`, `--date` (default: today from `ctx.now()`'s
+  *local* date components, not `toISOString`), `--comment`, `--payee`.
+- `--id <uuid>`: dry-run without `--id` generates a UUID v4 and prints it
+  inside the ready-to-run apply command; `--apply` requires `--id` (exit 2
+  without it), so the command that is retried is always the same one.
+- `user`: the account's `user`.
 
-- Exactly one of `--expense <n>` / `--income <n>` (positive decimal).
-- `--account <query>` required; currency is the account's.
-- Optional: `--category <query>`, `--date` (default: today, local time),
-  `--comment`, `--payee`.
-- New id: a client-generated UUID v4, printed in the dry-run and reused by
-  `--apply` only if the caller passes it back via `--id <uuid>` (so that a
-  retry after a network failure is idempotent). Without `--id`, `--apply`
-  generates a fresh one.
+### `zm delete <id...>`
 
-### `zm tx delete <id...>`
+Explicit ids only.
 
-Explicit ids only; no filters, by design.
+### Input validation
+
+- Amount: `^\d{1,12}(\.\d{1,2})?$`, must be > 0 (no `1e3`, no `0x`, no
+  signs, no spaces — same spirit as `TIMEOUT_RE` in `src/api/client.ts`).
+- Date: existing `YYYY-MM-DD` validator.
+- Unknown id: exit 2 listing the unknown ids. Duplicate ids in one call:
+  exit 2.
+- All of this before opening the cache (repo rule).
+
+## Plan token
+
+The dry-run computes `token = first 16 hex chars of sha256(canonical JSON
+of [{ op, id, baseChanged, set }])`, sorted by id, where `baseChanged` is
+the target's cached `changed` (`null` for create) and `set` is the exact
+raw-field assignments to be sent (for create: the whole new object minus
+`changed`/`created`; for delete: `{}`).
+
+The dry-run prints the exact apply command, e.g.
+`zm edit 3b67… --comment Higgsfield --apply --expect 9f2c1a…`.
+
+`--apply` recomputes the plan from the **post-sync** cache and compares
+tokens. Mismatch → exit **CONFLICT (7)**, hint "rerun without --apply to
+review the current state". This covers changes made in the app, by another
+`zm` run, or by a `zm sync` between dry-run and apply.
 
 ## Output
 
-Every write command prints the usual `{ data, meta, warnings? }` envelope:
+`{ data, meta, warnings? }` envelope:
 
 ```
 data: {
   applied: boolean,
-  changes: [{ op: "create"|"update"|"delete", id, before|null, after|null, fields: string[] }],
+  token: string,
+  applyCommand: string | null,     // null when applied
+  changes: [{ op, id, before: Tx|null, after: Tx|null, fields: string[], raw?: ZmTransaction }],
   balanceImpact: [{ accountId, accountTitle, currency, delta }]
 }
 ```
 
-`before`/`after` are `Tx` rows in the same shape as `zm tx`. `balanceImpact`
-is per account and per currency — never summed across currencies.
-`--format table` renders one row per changed field (`id, op, field, before,
-after`).
+- `fields`: the raw field names in `set` (create: every field set; delete:
+  `[]`).
+- `raw`: present on `delete` only — the full cached raw transaction, since a
+  `Tx` row drops tags beyond the first, merchant id, `op*`, `user`,
+  `created`.
+- `balanceImpact`: per account and currency; never summed across
+  currencies.
+- `--format table`: one row per changed field (`id, op, field, before,
+  after`); delete rows show `field: *`.
 
 ## Write flow
 
-Dry-run:
-1. Validate every flag before opening the cache.
-2. Load targets from the cache; build each new raw transaction by copying
-   the cached raw JSON and changing only the requested fields (unknown
-   fields preserved verbatim).
-3. Print the envelope with `applied: false`. No network.
+Dry-run: validate → open cache → look up targets → build new raw objects
+by copying cached raw JSON and changing only `set` (unknown fields kept
+verbatim) → compute token → print. No network.
 
 `--apply`:
-1. Steps 1–2 as above; remember each target's cached `changed`.
-2. Run an incremental sync (same code path as `zm sync`) and apply it to
-   the cache.
-3. Re-read targets. If any target is gone, deleted, or its `changed`
-   differs from step 1, exit **CONFLICT (7)** — hint: rerun without
-   `--apply` to see the current state. Nothing is sent.
-4. Rebuild the patch from the post-sync state and send it in **one**
-   `POST /v8/diff`:
-   - `transaction`: edited and created transactions, `changed = now`
-     (seconds); created ones also get `created = now` and `user` = the
-     target account's `user`;
-   - `deletion`: `{ id, object: "transaction", stamp: now, user }`;
-   - `account`: only if the balance question below resolves to "client
-     sends balances".
-5. Apply the server's response diff to the cache (same `applyDiff`), store
-   its `serverTimestamp`, print `applied: true`.
+1. Validate; `--expect` and (for `add`) `--id` present.
+2. Incremental sync via the existing sync path; apply to cache.
+3. **Retry detection** (per target, post-sync):
+   - edit: every field in `set` already equals the planned value →
+     already applied;
+   - add: id exists and matches the planned object → already applied;
+     exists but differs → CONFLICT;
+   - delete: target is `deleted` or listed in a deletion → already applied.
+   If *all* targets are already applied: exit 0, `applied: true`,
+   `warnings: ["already applied"]`, no POST. If only some are: CONFLICT.
+4. Recompute the plan from the post-sync cache; token mismatch → CONFLICT.
+5. One `POST /v8/diff` with the post-sync `serverTimestamp` and
+   `currentClientTimestamp`, plus:
+   - `transaction`: edited/created objects with
+     `changed = max(nowSec, base.changed + 1)` (clock-skew guard); created
+     get `created = changed`;
+   - deletions: exact wire format to be confirmed (below);
+   - `account`: only if the balance question requires it.
+   `fetchDiff` is generalised to take an optional payload rather than a
+   second HTTP function being written.
+6. Apply the response diff to the cache with `applyDiff`, store its
+   `serverTimestamp`, print `applied: true`.
+   - If the POST succeeded but step 6 fails (CACHE_BUSY, SQLITE_FULL, …):
+     still exit 0 with `applied: true` and `warnings: ["written to
+     ZenMoney, but the local cache was not updated — run zm sync"]`.
+7. Network failure during the POST (response unknown): exit NETWORK with
+   hint "the change may have been written; run the same command again — it
+   is safe to retry". Retrying the identical command hits step 3. `zm`
+   never retries automatically.
 
-Network failure after the request may have been sent: exit NETWORK with the
-hint "run zm sync, then check with zm tx". `zm` never retries by itself.
+The window between step 2 and step 5 (a change landing on the server in
+between) cannot be closed with this protocol; it is documented, not
+handled.
 
-## Open question to resolve first: account balances
+## Open questions — resolve before implementation, without the live API
 
-It is not yet verified whether the ZenMoney server recomputes
-`account.balance` after transaction writes, or whether clients are expected
-to send updated accounts alongside. The first implementation step is to
-settle this from the ZenMoney API documentation (ZenPlugins wiki) and the
-behaviour of the open-source clients — **without calling the live API**.
-If clients send balances, `balanceImpact` is also applied to the affected
-accounts and sent in the same POST. The result is recorded in
-`docs/architecture.md`.
+From the ZenMoney API docs (ZenPlugins wiki) and open-source clients:
+1. Does the server recompute `account.balance` after transaction writes, or
+   must clients send updated accounts? If the latter, `balanceImpact` is
+   applied to the affected raw accounts and sent in the same POST.
+2. Deletion wire format: `deletion: [{ id, object: "transaction", stamp,
+   user }]` vs. sending the transaction with `deleted: true`.
+3. What the POST response contains (only changes since the sent
+   `serverTimestamp`, including ours?).
+
+Answers are recorded in `docs/architecture.md`; if any answer contradicts
+this spec, the spec is updated before coding.
 
 ## Errors
 
 | Situation | Code |
 |---|---|
-| bad/missing selector or field flags, `--expense`+`--income`, bad date/amount, `--amount`/`--account` on transfer/debt/multi-currency, cross-currency `--account`, over `--max`, unknown/ambiguous id | INVALID_ARGS (2) |
-| no token, token rejected | AUTH (3) |
+| bad/missing flags, `--apply` without `--expect`, `add --apply` without `--id`, bad amount/date, restricted field on restricted tx, cross-instrument `--account`, unknown/duplicate id, `--owner` ≠ all | INVALID_ARGS (2) |
+| no token / token rejected | AUTH (3) |
 | unreachable, timeout, 5xx (token scrubbed as today) | NETWORK (4) |
 | no cache | NO_CACHE (5) |
-| cache busy | CACHE_BUSY (6) |
-| target changed/deleted on the server since the last sync | CONFLICT (7) — new |
+| cache busy before the POST | CACHE_BUSY (6) |
+| token mismatch, partial retry, `add` id exists with different content | CONFLICT (7) — new |
 
 ## Agent rules
 
 - SKILL.md: agents may run `--apply` only when the user explicitly asked
-  for that change and was shown the dry-run output first.
-- CLAUDE.md: the "never make live network calls" rule gains the same
-  exception for `zm tx ... --apply`; `zm auth` stays forbidden.
+  for that change and was shown the dry-run first; always use the printed
+  `applyCommand` verbatim.
+- CLAUDE.md is **not** loosened: it governs agents working on this
+  repository, where live calls stay forbidden. Add `--apply` to its
+  "Never" list next to `zm auth`/`zm sync`.
 
 ## Testing
 
-- Unit: patch building (unknown fields preserved, per-currency
-  `balanceImpact`, refusals for transfers/multi-currency, `--max`, id vs
-  filter selection).
-- `--apply` flow with a mocked `fetch`: success, CONFLICT, 401, network
-  failure, idempotent `add --id` retry; assert the POST body and that the
-  cache reflects the response.
-- e2e (built binary): dry-run over the synthetic fixture, no network.
-- Only `tests/fixtures/diff.ts` / synthetic data. Coverage thresholds
-  unchanged.
+- Unit: patch building (unknown fields kept, `payee` clears `merchant`,
+  both account/instrument fields on `--account`, restricted detection incl.
+  `op*`), token determinism and sensitivity, amount/date validation,
+  per-currency `balanceImpact`, income↔refund reclassification shown.
+- `--apply` with mocked `fetch`: success; CONFLICT on token mismatch;
+  already-applied (edit/add/delete) and partial retry; 401; network error;
+  POST ok but cache write fails → exit 0 + warning; request body
+  (`serverTimestamp`, `changed` skew guard, deletion format).
+- e2e (built binary): dry-run over the synthetic fixture, no network;
+  `--apply` without `--expect` exits 2.
+- Synthetic data only. Coverage thresholds unchanged.
 
 ## Docs
 
-README (drop "Read-only", command reference), SKILL.md (rule + table),
-`docs/architecture.md` (write flow, CONFLICT, balance decision), CLAUDE.md
-(exception), CHANGELOG `[Unreleased]`, new exit code 7 everywhere exit
-codes are listed.
+README (drop "Read-only", new commands, plan token), SKILL.md (rule +
+table), `docs/architecture.md` (write flow, token, CONFLICT, answers to the
+open questions), CLAUDE.md ("Never" list), CHANGELOG `[Unreleased]`, exit
+code 7 wherever exit codes are listed.
