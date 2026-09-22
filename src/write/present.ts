@@ -104,13 +104,13 @@ export function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`
 }
 
-// argv is the user's original arguments after `zm` (e.g. ['edit', 't1',
-// '--comment', 'Higgs field']), exactly as invoked for the dry run this
-// apply command is offered from. The caller guarantees argv carries no
-// --apply/--expect of its own (dry-run's own arg parsing already rejects
-// a --apply/--expect it wasn't given a plan token for) — so this never
-// strips or rewrites anything, only appends the two flags that turn the
-// same invocation into the apply one.
+// argv is not the raw process argv — it's the command line the caller
+// rebuilds from its already-parsed options (command name, ids, then each
+// provided flag and its value, e.g. ['edit', 't1', '--comment', 'Higgs
+// field']). The caller is responsible for never including --apply or
+// --expect in it; this function doesn't look for or strip either one, it
+// only appends a fresh `--apply --expect <token>` and shell-quotes every
+// element.
 export function applyCommand(argv: string[], token: string): string {
   return ['zm', ...argv, '--apply', '--expect', token].map(shellQuote).join(' ')
 }
