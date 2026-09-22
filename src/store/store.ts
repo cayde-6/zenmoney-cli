@@ -203,7 +203,14 @@ export class Store {
   getTransaction(id: string): ZmTransaction | null {
     return this.guard(() => {
       const row = this.db.prepare(`SELECT raw FROM "transaction" WHERE id = ?`).get(id) as { raw: string } | undefined
-      return row ? JSON.parse(row.raw) as ZmTransaction : null
+      if (!row) return null
+      try {
+        return JSON.parse(row.raw) as ZmTransaction
+      } catch {
+        // Same corruption -> NO_CACHE mapping as all() above: this table is
+        // never written with anything but JSON.stringify'd data.
+        throw corruptCacheError(this.file)
+      }
     })
   }
 

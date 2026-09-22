@@ -343,6 +343,25 @@ it('getTransaction returns the raw row, deleted ones included, or null', () => {
   expect(s.getTransaction('t1')?.deleted).toBe(true)
   expect(s.getTransaction('nope')).toBeNull()
 })
+// getTransaction must translate a corrupt row's JSON.parse failure to the
+// same NO_CACHE error as all() (see corruptCacheError) instead of letting a
+// raw SyntaxError escape it.
+it('getTransaction throws NO_CACHE with the same hint as all() when the row is not valid JSON', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zm-'))
+  const file = join(dir, 'zm.sqlite')
+  const s = Store.open(file)
+  s.applyDiff(fixtureDiff(), new Date())
+  s.close()
+  const raw = new DatabaseSync(file)
+  raw.exec('PRAGMA journal_mode=WAL')
+  raw.prepare(`UPDATE "transaction" SET raw = 'not json' WHERE id = 't1'`).run()
+  raw.close()
+  const s2 = Store.open(file)
+  expect(() => s2.getTransaction('t1')).toThrow(
+    expect.objectContaining({ code: 'NO_CACHE', hint: `delete ${file} and run zm sync --full` }),
+  )
+  s2.close()
+})
 // reset()'s own BEGIN/DELETE/COMMIT has the same rollback-on-failure shape as
 // applyDiff's (already covered by the BigInt-serialization test above), but
 // reset() never serializes anything, so it needs its own way to fail
