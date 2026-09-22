@@ -5,8 +5,13 @@ description: "Read a user's ZenMoney spending via the zm CLI: transactions, per-
 
 # zenmoney-cli
 
-`zm` is a read-only CLI over a user's ZenMoney data. It never writes to
-ZenMoney — only to a local SQLite cache and local budget yaml files.
+`zm` reads a user's ZenMoney data for analysis, and can also write it back
+through three commands: `zm edit`, `zm add`, `zm delete`. Every one of
+those is a dry-run by default and writes only with `--apply --expect
+<token>` from a dry-run already shown to the user — see "Rules for
+agents" and the command reference below. Every other command is
+read-only; anything else this CLI writes is local (its own SQLite cache
+and, if asked, budget yaml files).
 
 ## Setup
 
@@ -90,8 +95,14 @@ those is available.
   subtract from the total. To reproduce a `spend` figure from raw `tx` rows
   yourself, filter to `type in (expense, refund)` and net them with that
   sign — never just sum `amount` across both types.
-- ZenMoney itself is never modified by this CLI — no operations, no
-  categories, no ZenMoney-side budgets are ever written.
+- ZenMoney itself is only ever modified through `zm edit`/`zm add`/`zm
+  delete`, and only transactions are ever written — no categories, no
+  accounts, no ZenMoney-side budgets. **Run `--apply` only when the user
+  explicitly asked for that specific change and has been shown the
+  dry-run output.** Always run the printed `applyCommand` verbatim — never
+  hand-construct `--apply --expect <token>` yourself. If `--apply` exits 7
+  (CONFLICT), rerun the dry-run and show it to the user again before
+  applying.
 - Budget files live in `~/.config/zm/budget/` (`default.yaml` plus optional
   `YYYY-MM.yaml` overrides). Only write or edit them when the user explicitly
   asks for a budget to be created or changed.
@@ -145,6 +156,9 @@ Run `zm <command> --help` for the exact flags and examples of any command.
 | `zm budget init` | `--force` | `{ file }` — writes a commented `default.yaml` template |
 | `zm budget status` | `--month` | `{ month, monthElapsedPct, rows: [{ category, categoryId, currency, planned, spent, spentOtherCurrencies, remaining, usedPct, monthElapsedPct, pace }], unplanned, unresolved: [{ key, amount, currency }] }` — a limit key that no longer resolves to any category is skipped (with a warning) rather than failing the command, and listed in `unresolved` |
 | `zm budget suggest` | `--months` (default 3), `--month` (default next month) | prints a draft yaml to stdout (not JSON, not written to a file) |
+| `zm edit <id...>` | `--comment`, `--payee`, `--category`, `--date`, `--amount`, `--account`, `--apply`, `--expect` | `{ applied, token, applyCommand, changes: [{ op, id, before, after, fields, raw? }], balanceImpact: [{ accountId, accountTitle, currency, delta }] }` — dry-run by default (`applied: false`, `applyCommand` the exact command that writes it); `--amount`/`--account` only work on a single-currency simple transaction (exit 2 on a transfer/debt/foreign-currency one, no partial edit); `--owner` other than `all` is rejected |
+| `zm add` | `--expense`\|`--income`, `--account`, `--category`, `--date`, `--comment`, `--payee`, `--id`, `--apply`, `--expect` | same `data` shape as `zm edit`; a dry-run without `--id` generates a UUID and includes it in `applyCommand`, so retrying always targets the same transaction; `--apply` requires `--id`; `--owner` other than `all` is rejected |
+| `zm delete <id...>` | `--apply`, `--expect` | same `data` shape; `changes[].raw` carries the full cached transaction being deleted (no local undo); `--owner` other than `all` is rejected |
 
 ## Recipes
 
@@ -199,6 +213,7 @@ than silently overriding the existing row. Finish with `zm budget status
 | 4 | network or ZenMoney API error |
 | 5 | no local cache (run `zm sync`), or the cache is corrupted (delete it and run `zm sync --full`) |
 | 6 | cache is busy (another `zm sync` is running) — retry in a few seconds |
+| 7 | `zm edit`/`zm add`/`zm delete --apply`: the data changed since the dry-run — rerun the dry-run and show it to the user again |
 
 On failure, stderr carries `{"error": {"code", "message", "hint"}}` (plain
 text with `--format table`).

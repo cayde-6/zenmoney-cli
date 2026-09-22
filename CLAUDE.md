@@ -79,7 +79,8 @@ before editing either.
 
 ## Never
 
-- Run `zm auth` or `zm sync` against the real ZenMoney API from an agent
-  session — both make live network calls.
+- Run `zm auth`, `zm sync`, or any `zm edit/add/delete --apply` against the
+  real ZenMoney API from an agent session — all three make live network
+  calls.
 - Commit real financial data, real names, emails, or other personal
   identifiers — this repository is public.
