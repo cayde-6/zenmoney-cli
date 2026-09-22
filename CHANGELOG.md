@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-22
+
+### Changed
+
+- Internal only, no user-visible behaviour change: removed four branch
+  arms that could never run (debt-side account title fallbacks in the
+  transaction model, and two defensive cases in the write-mode plan token).
+  Plan tokens are unchanged, so a dry-run printed by 0.2.0 still applies.
+
 ## [0.2.0] - 2026-09-22
 
 ### Added
@@ -261,7 +270,8 @@ Initial release of `@cayde-6/zenmoney-cli`.
   category titles from real ZenMoney data are still handled correctly at
   runtime.
 
-[Unreleased]: https://github.com/cayde-6/zenmoney-cli/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cayde-6/zenmoney-cli/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/cayde-6/zenmoney-cli/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/cayde-6/zenmoney-cli/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/cayde-6/zenmoney-cli/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cayde-6/zenmoney-cli/releases/tag/v0.1.0

@@ -1,6 +1,6 @@
 {
   "name": "@cayde-6/zenmoney-cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "ZenMoney CLI: read-only analysis, plus dry-run-first writes (zm edit/add/delete)",
   "type": "module",
   "bin": {
