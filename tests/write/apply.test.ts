@@ -63,6 +63,9 @@ it('apply success: pushes against the post-sync serverTimestamp with a skew-guar
   expect(calls[1].transaction).toHaveLength(1)
   expect(calls[1].transaction[0].comment).toBe('New')
   expect(calls[1].transaction[0].changed).toBe(changed)
+  // An edit keeps the target's original `created` — only a `create`'s
+  // payload gets `created` overridden (see the create-payload test below).
+  expect(calls[1].transaction[0].created).toBe(1780000000)
 
   const store = Store.open(t.ctx.paths.cacheDb)
   try {
@@ -88,7 +91,7 @@ it('token mismatch (data changed since the dry-run) exits CONFLICT with only the
 
   await expect(
     runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', '--comment', 'New'], apply: true, expect: token, plan: editT1 }),
-  ).rejects.toMatchObject({ code: 'CONFLICT' })
+  ).rejects.toMatchObject({ code: 'CONFLICT', message: 'the data changed since the dry-run' })
   expect(calls).toHaveLength(1)
 })
 
@@ -111,20 +114,50 @@ it('already applied (sync already reflects the target state): exit 0, "already a
   expect(out.warnings).toContain('already applied')
 })
 
-it('partial retry (one target already applied, the other not) exits CONFLICT', async () => {
+it('a target already in the requested state is dropped from the plan, never blocking the rest', async () => {
   const calls: any[] = []
-  const t1 = fixtureStore().getTransaction('t1')!
-  const syncResponse = { serverTimestamp: 1789000050, transaction: [{ ...t1, comment: 'New', changed: 1780000600 }] }
-  const t = seededContext({ env: { ZENMONEY_TOKEN: 'tok' }, now: () => NOW, fetch: apiFetch([syncResponse], calls) })
+  // t4 already has the target comment from the very start (as if a
+  // previous zm edit, or an app edit, already landed it) - seeded directly
+  // in the cache, since a dry-run never syncs.
+  const t4Already = { ...fixtureStore().getTransaction('t4')!, comment: 'New' }
+  const changed = Math.max(NOW_SEC, T1_CHANGED + 1)
+  const pushedT1 = { ...fixtureStore().getTransaction('t1')!, comment: 'New', changed }
+  const syncResponse1 = { serverTimestamp: 1789000050 } // nothing new: t1/t4 come from the seeded cache
+  const pushResponse = { serverTimestamp: 1789000100, transaction: [pushedT1] }
+  const syncResponse2 = { serverTimestamp: 1789000150 } // retry's sync: nothing new either
+  const t = seededContext({
+    env: { ZENMONEY_TOKEN: 'tok' },
+    now: () => NOW,
+    fetch: apiFetch([syncResponse1, pushResponse, syncResponse2], calls),
+  })
+  const seed = Store.open(t.ctx.paths.cacheDb)
+  seed.applyDiff({ serverTimestamp: 1789000000, transaction: [t4Already] }, new Date('2026-09-15T08:00:00Z'))
+  seed.close()
 
   await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', 't4', '--comment', 'New'], apply: false, expect: undefined, plan: editT1AndT4 })
-  const token = t.json().data.token
+  const dry = t.json()
+  expect(dry.warnings).toContain('already in that state: t4')
+  expect(dry.data.changes.map((c: any) => c.id)).toEqual(['t1'])
+  const token = dry.data.token
   t.out.length = 0
 
-  await expect(
-    runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', 't4', '--comment', 'New'], apply: true, expect: token, plan: editT1AndT4 }),
-  ).rejects.toMatchObject({ code: 'CONFLICT' })
-  expect(calls).toHaveLength(1)
+  await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', 't4', '--comment', 'New'], apply: true, expect: token, plan: editT1AndT4 })
+  expect(calls).toHaveLength(2)
+  expect(calls[1].transaction).toEqual([expect.objectContaining({ id: 't1' })]) // t4 never sent
+  const applied = t.json()
+  expect(applied.data.applied).toBe(true)
+  expect(applied.data.changes.map((c: any) => c.id)).toEqual(['t1'])
+  t.out.length = 0
+
+  // Retry the identical apply command: t1 now matches (from the push
+  // response just applied to the cache) and t4 always did -> every target
+  // is applied, no second push.
+  await runWrite(t.ctx, { format: 'json', argv: ['edit', 't1', 't4', '--comment', 'New'], apply: true, expect: token, plan: editT1AndT4 })
+  expect(calls).toHaveLength(3) // one more sync call, no push
+  expect(calls[2].transaction).toBeUndefined()
+  const retry = t.json()
+  expect(retry.data.applied).toBe(true)
+  expect(retry.warnings).toContain('already applied')
 })
 
 it('add with an id that already exists with different content exits CONFLICT', async () => {
@@ -142,7 +175,7 @@ it('add with an id that already exists with different content exits CONFLICT', a
 
   await expect(
     runWrite(t.ctx, { format: 'json', argv: ['add', '--expense', '1', '--account', 'acc-pln', '--id', uuid], apply: true, expect: token, plan: addPlan }),
-  ).rejects.toMatchObject({ code: 'CONFLICT' })
+  ).rejects.toMatchObject({ code: 'CONFLICT', message: `transaction ${uuid} already exists with different content` })
   expect(calls).toHaveLength(1)
 })
 
@@ -276,6 +309,10 @@ it('a push response missing the impacted account adds a balance warning; one tha
     t.out.length = 0
     await runWrite(t.ctx, { format: 'json', argv: ['add', '--expense', '12.50', '--account', 'acc-pln', '--id', uuid], apply: true, expect: token, plan: addPlan })
     expect(t.json().warnings).toContain('account Card PLN: the server response did not include an updated balance; check it in ZenMoney')
+    // A create's payload gets `created` overridden to the same
+    // skew-guarded value as `changed` (unlike an edit, which keeps the
+    // target's original `created` — see the apply-success test above).
+    expect(calls[1].transaction[0].created).toBe(calls[1].transaction[0].changed)
   }
   {
     const calls: any[] = []

@@ -19,12 +19,30 @@ import { isApplied, planToken, type PlannedChange } from './plan.js'
 import { applyCommand, balanceImpact, changeViews, tableRows, type WriteData } from './present.js'
 
 // Builds the plan from a Store; called once for dry-run (postSync: false),
-// and once after the sync for --apply (postSync: true). How each planner
-// treats a missing/deleted target in each mode is defined by the caller
-// (the CLI commands, built in a later task) - this module just calls it.
+// and once after the sync for --apply (postSync: true). Planners decide how
+// a missing/deleted target is treated in each mode - this module just calls
+// it and works with whatever PlannedChange rows come back.
 export type Planner = (store: Store, ds: Dataset, o: { postSync: boolean }) => PlannedChange[]
 
 const RERUN_HINT = 'rerun without --apply to review the current state'
+
+// Splits a plan into the changes that still need to happen and the ids of
+// the ones that are already in their target state (see the lead ruling in
+// the design spec's write flow: a target already matching the request is
+// dropped from what gets sent, never treated as blocking the rest - a
+// multi-target edit where only some targets still need the change must
+// still be applicable, not stuck in a permanent conflict loop against
+// itself). Shared by the dry-run and --apply branches below, which both
+// need to work with `pending` rather than the full plan from here on.
+function splitPending(store: Store, changes: PlannedChange[]): { pending: PlannedChange[]; alreadyIds: string[] } {
+  const pending: PlannedChange[] = []
+  const alreadyIds: string[] = []
+  for (const c of changes) {
+    if (isApplied(c, store.getTransaction(c.id))) alreadyIds.push(c.id)
+    else pending.push(c)
+  }
+  return { pending, alreadyIds }
+}
 
 export async function runWrite(ctx: AppContext, opts: {
   format: Format
@@ -38,21 +56,24 @@ export async function runWrite(ctx: AppContext, opts: {
     try {
       const ds = loadDataset(store)
       const changes = opts.plan(store, ds, { postSync: false })
-      const token = planToken(changes)
+      const { pending, alreadyIds } = splitPending(store, changes)
+      const token = planToken(pending)
       const { lastSyncAt } = store.getMeta()
       const warnings = [...staleWarnings(ctx, lastSyncAt)]
-      if (changes.every(c => isApplied(c, store.getTransaction(c.id)))) {
+      if (pending.length === 0) {
         warnings.push('nothing to change: already in that state')
+      } else if (alreadyIds.length > 0) {
+        warnings.push(`already in that state: ${alreadyIds.join(', ')}`)
       }
       const data: WriteData = {
         applied: false,
         token,
         applyCommand: applyCommand(opts.argv, token),
-        changes: changeViews(ds, changes),
-        balanceImpact: balanceImpact(ds, changes),
+        changes: changeViews(ds, pending),
+        balanceImpact: balanceImpact(ds, pending),
       }
       printResult(
-        { data, meta: { lastSyncAt }, table: tableRows(changes), ...(warnings.length ? { warnings } : {}) },
+        { data, meta: { lastSyncAt }, table: tableRows(pending), ...(warnings.length ? { warnings } : {}) },
         opts.format,
         ctx.stdout,
       )
@@ -62,9 +83,9 @@ export async function runWrite(ctx: AppContext, opts: {
     return
   }
 
-  // --apply. `--expect` is checked here too (the CLI layer also checks it,
-  // see Task 5) so this module is safe to call directly, and before opening
-  // the store so a missing token fails the same way with or without a cache.
+  // --apply. `--expect` is checked here too (the CLI layer also checks it)
+  // so this module is safe to call directly, and before opening the store
+  // so a missing token fails the same way with or without a cache.
   if (!opts.expect) {
     throw new ZmError(
       'INVALID_ARGS',
@@ -90,11 +111,12 @@ export async function runWrite(ctx: AppContext, opts: {
     const changes = opts.plan(store, ds, { postSync: true })
     const warnings = [...staleWarnings(ctx, store.getMeta().lastSyncAt)]
 
-    const appliedFlags = changes.map(c => isApplied(c, store.getTransaction(c.id)))
-    const allApplied = appliedFlags.every(Boolean)
-    const anyApplied = appliedFlags.some(Boolean)
+    const { pending } = splitPending(store, changes)
 
-    if (allApplied) {
+    if (pending.length === 0) {
+      // Every target already matches the requested state - as today,
+      // reported against the full plan (there's nothing left "pending" to
+      // narrow it to), no POST made.
       warnings.push('already applied')
       const data: WriteData = {
         applied: true,
@@ -106,25 +128,24 @@ export async function runWrite(ctx: AppContext, opts: {
       printResult({ data, meta: { lastSyncAt: store.getMeta().lastSyncAt }, table: tableRows(changes), warnings }, opts.format, ctx.stdout)
       return
     }
-    if (anyApplied) {
-      throw new ZmError('CONFLICT', 'some of these changes are already applied and others are not', RERUN_HINT)
-    }
 
-    // Reached only when nothing is applied yet: a `create` whose id already
-    // exists (with different content - isApplied above already ruled out a
-    // matching one) is a genuine conflict, not a retry.
-    for (const c of changes) {
+    // Reached with at least one target still pending (already-applied ones
+    // were dropped above, never blocking the rest): a `create` among the
+    // pending ones whose id already exists (with different content -
+    // isApplied above already ruled out a matching one) is a genuine
+    // conflict, not a retry.
+    for (const c of pending) {
       if (c.op === 'create' && store.getTransaction(c.id) !== null) {
         throw new ZmError('CONFLICT', `transaction ${c.id} already exists with different content`, RERUN_HINT)
       }
     }
 
-    if (planToken(changes) !== opts.expect) {
+    if (planToken(pending) !== opts.expect) {
       throw new ZmError('CONFLICT', 'the data changed since the dry-run', RERUN_HINT)
     }
 
     const nowSec = Math.floor(ctx.now().getTime() / 1000)
-    const payload = changes.map(c => {
+    const payload = pending.map(c => {
       const changed = Math.max(nowSec, (c.base?.changed ?? 0) + 1)
       return { ...c.next, changed, ...(c.op === 'create' ? { created: changed } : {}) }
     })
@@ -149,7 +170,7 @@ export async function runWrite(ctx: AppContext, opts: {
     // transaction write's response may not always echo the updated account
     // (see the design spec's API facts) - flag it per account rather than
     // silently trusting a balance the response never actually confirmed.
-    const impact = balanceImpact(ds, changes)
+    const impact = balanceImpact(ds, pending)
     for (const entry of impact) {
       if (!(response.account ?? []).some(a => a.id === entry.accountId)) {
         warnings.push(`account ${entry.accountTitle}: the server response did not include an updated balance; check it in ZenMoney`)
@@ -158,13 +179,13 @@ export async function runWrite(ctx: AppContext, opts: {
 
     const data: WriteData = {
       applied: true,
-      token: planToken(changes),
+      token: planToken(pending),
       applyCommand: null,
-      changes: changeViews(ds, changes),
+      changes: changeViews(ds, pending),
       balanceImpact: impact,
     }
     printResult(
-      { data, meta: { lastSyncAt: store.getMeta().lastSyncAt }, table: tableRows(changes), ...(warnings.length ? { warnings } : {}) },
+      { data, meta: { lastSyncAt: store.getMeta().lastSyncAt }, table: tableRows(pending), ...(warnings.length ? { warnings } : {}) },
       opts.format,
       ctx.stdout,
     )

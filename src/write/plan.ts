@@ -2,9 +2,9 @@
 // and field input into PlannedChange rows plus a deterministic plan token,
 // with no I/O, no network, and no store writes (see docs/architecture.md and
 // docs/superpowers/specs/2026-09-22-tx-write-mode-design.md). Callers (the
-// CLI commands, built in a later task) do target lookup, formatting, and the
-// apply flow; this module only decides what a change's raw diff looks like
-// and whether one has already landed.
+// CLI commands) do target lookup, formatting, and the apply flow; this
+// module only decides what a change's raw diff looks like and whether one
+// has already landed.
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { ZmTransaction } from '../api/types.js'
@@ -204,6 +204,12 @@ export function isApplied(c: PlannedChange, current: ZmTransaction | null): bool
   if (c.op === 'delete') return current === null || current.deleted === true
   if (current === null || current.deleted) return false
   const row = current as unknown as Record<string, unknown>
-  const keys = c.op === 'create' ? CREATE_COMPARE_FIELDS : Object.keys(c.set)
+  // `merchant` is dropped from an 'update' comparison even when it's one of
+  // `set`'s keys: planEdit only ever sets it (to null) as a side effect of
+  // --payee, and the server is free to re-link a merchant from the new
+  // payee text on its own. Comparing it here would make a write that landed
+  // exactly as planned look permanently unapplied over a field the caller
+  // never actually asked to control.
+  const keys = c.op === 'create' ? CREATE_COMPARE_FIELDS : Object.keys(c.set).filter(k => k !== 'merchant')
   return keys.every(k => isDeepStrictEqual(normalizeForCompare(row[k]), normalizeForCompare(c.set[k])))
 }

@@ -253,6 +253,16 @@ it('isApplied for update treats null/undefined/"" in a set field as the same "no
   expect(isApplied(cUpdate, { ...t1, comment: 'still there' })).toBe(false)
 })
 
+it('isApplied for update ignores merchant: the server may re-link one from the payee text', () => {
+  const [c] = planEdit(ds, [t1], { payee: 'X' })
+  expect(c!.set).toEqual({ payee: 'X', merchant: null })
+  // payee landed, but the server re-linked a merchant instead of leaving it
+  // null: still applied, merchant was never something the caller controlled.
+  expect(isApplied(c!, { ...t1, payee: 'X', merchant: 'm-x' })).toBe(true)
+  // payee itself not yet applied -> not applied, regardless of merchant.
+  expect(isApplied(c!, { ...t1, payee: 'Y', merchant: 'm-x' })).toBe(false)
+})
+
 it('isApplied for delete', () => {
   const cDelete: PlannedChange = { op: 'delete', id: 't1', base: t1, next: { ...t1, deleted: true }, set: {} }
   expect(isApplied(cDelete, null)).toBe(true)
