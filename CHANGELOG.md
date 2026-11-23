@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-23
+
+### Security
+
+- Update the separately installed `source-map-js` development dependency
+  from 1.2.1 to 1.2.2 to fix indexed source-map denial of service
+  (CVE-2026-93749, #13). This update does not replace the older copy
+  embedded in `magicast` 0.5.5.
+
+### Changed
+
+- Update the locked Commander runtime dependency from 15.0.0 to 15.1.0
+  (#12).
+
 ## [0.2.2] - 2026-09-22
 
 ### Changed
@@ -277,7 +291,8 @@ Initial release of `@cayde-6/zenmoney-cli`.
   category titles from real ZenMoney data are still handled correctly at
   runtime.
 
-[Unreleased]: https://github.com/cayde-6/zenmoney-cli/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/cayde-6/zenmoney-cli/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/cayde-6/zenmoney-cli/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/cayde-6/zenmoney-cli/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/cayde-6/zenmoney-cli/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/cayde-6/zenmoney-cli/compare/v0.1.1...v0.2.0
